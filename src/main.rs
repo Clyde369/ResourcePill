@@ -4,6 +4,15 @@
 mod stats;
 mod temps;
 mod admin;
+mod recorder;
+mod extras;
+mod settings;
+mod edge;
+mod explainui;
+mod media;
+mod music;
+#[allow(dead_code)] // download fields are used by the helper
+mod catalog;
 
 use std::cell::RefCell;
 use std::f32::consts::PI;
@@ -36,7 +45,20 @@ const V_PILL: f32 = 68.0; // vertical pill width
 const V_SEG: f32 = 60.0;
 const CLOCK_W: f32 = 70.0; // clock cell in the horizontal pill
 const CLOCK_V: f32 = 50.0; // clock cell height in the vertical pill
+const REC_W: f32 = 38.0; // record button in the horizontal pill
+const REC_V: f32 = 36.0; // record button height in the vertical pill
+const STRIP_H: f32 = 100.0; // live transcript strip (3 lines)
+const STRIP_LINES_BIG: usize = 10; // lines shown when the strip is clicked open
+const MASCOT_W: f32 = 38.0; // the living helper icon in the horizontal pill
+const GEAR_W: f32 = 30.0; // settings button at the start of the pill
+const GEAR_V: f32 = 30.0;
+const MASCOT_V: f32 = 38.0;
 const GAP: f32 = 8.0;
+const TIP_W: f32 = 176.0; // explain tooltip by the highlight
+const TIP_H: f32 = 32.0;
+const MUSIC_W: f32 = 216.0; // now-playing cell at the end of the pill
+const MUSIC_V: f32 = 48.0;
+const MUSIC_PANEL_H: f32 = 196.0;
 const PANEL_W: f32 = 330.0;
 const ROW_H: f32 = 28.0; // top-list row height; panels grow with their rows (min 3)
 const CARD_W: f32 = 380.0;
@@ -54,9 +76,20 @@ const WM_TRAY: u32 = WM_APP + 2;
 const WM_APP_DPI: u32 = WM_APP + 3;
 const WM_APP_SHOW: u32 = WM_APP + 4;
 const WM_APP_QUIT: u32 = WM_APP + 5;
+const WM_APP_SCRIBE: u32 = WM_APP + 6; // output from the transcriber helper
+const WM_APP_JOB: u32 = WM_APP + 7; // output from an explain/download job
+const WM_APP_MENU: u32 = WM_APP + 8; // open the settings menu (from the gear button)
+const WM_APP_MEDIA: u32 = WM_APP + 12; // now-playing changed (song, state, cover)
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM: usize = 1;
+const TIMER_PULSE: usize = 2; // ~20 fps while something is working (pulse, mascot)
+const TIMER_BLINK: usize = 3; // the mascot blinks every few seconds
+const TIMER_TIP: usize = 4; // hides the explain tooltip after a while
+const TIMER_EDGE: usize = 5; // edge auto-hide: watches the mouse (cheap, ~12 checks a second)
+const EDGE_LINE: i32 = 3; // px of the glowing line left on screen when tucked
 const HOTKEY: i32 = 1;
+const HOTKEY_REC: i32 = 2; // Ctrl+Alt+R
+const HOTKEY_EXPLAIN: i32 = 3; // Ctrl+Alt+E
 const CLASS: PCWSTR = w!("ResourcePill.Window");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: PCWSTR = w!("ResourcePill");
@@ -93,6 +126,7 @@ const OPACITY: [(&str, f32); 4] = [("100%", 1.0), ("85%", 0.85), ("70%", 0.7), (
 const INTERVALS: [(&str, u32); 3] = [("0.5 s", 500), ("1 s", 1000), ("2 s", 2000)];
 const SMOOTH: [&str; 3] = ["Off (raw, like Task Manager)", "Light", "Strong"];
 const ANIMS: [&str; 2] = ["Full (fluid)", "Reduced (lowest CPU)"];
+const FPS: [u32; 4] = [15, 25, 30, 60]; // frame rate choices for every animation
 const PLACES: [&str; 8] = ["Top centre", "Top left", "Top right", "Bottom centre", "Bottom left", "Bottom right", "Left side", "Right side"];
 
 // ---------- settings ----------
@@ -112,12 +146,24 @@ struct Settings {
     admin_mode: bool,
     clock: bool,
     anim: usize,
+    asr: usize, // index into recorder::ASR
+    llm: usize, // index into recorder::LLM; == LLM.len() means no summary
+    chime: bool,
+    explain: usize, // 0 = local model, 1 = Claude, 2 = Gemini (cloud ones need a stored API key)
+    final_pass: bool, // re-transcribe accurately after stopping
+    half_chime: bool,
+    cues: bool, // soft sounds for recording and highlights
+    tx_cloud: bool, // transcribe + summarise with Gemini after stopping (needs a Google key)
+    voice: bool, // read explanations aloud (Windows voice)
+    fps: usize, // index into FPS
+    auto_hide: bool, // tuck into the screen edge when the mouse is away
+    keep_audio: bool,
     pos: Option<(i32, i32)>, // pill top-left, physical px
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, auto_hide: false, pos: None }
     }
 }
 
@@ -148,6 +194,18 @@ impl Settings {
                 "admin_mode" => s.admin_mode = v == "1",
                 "clock" => s.clock = v == "1",
                 "anim" => s.anim = idx(ANIMS.len()).unwrap_or(0),
+                "asr" => s.asr = idx(recorder::ASR.len()).unwrap_or(0),
+                "llm" => s.llm = idx(recorder::LLM.len() + 1).unwrap_or(0),
+                "chime" => s.chime = v == "1",
+                "explain" => s.explain = idx(3).unwrap_or(0),
+                "final_pass" => s.final_pass = v == "1",
+                "keep_audio" => s.keep_audio = v == "1",
+                "half_chime" => s.half_chime = v == "1",
+                "cues" => s.cues = v == "1",
+                "tx_cloud" => s.tx_cloud = v == "1",
+                "voice" => s.voice = v == "1",
+                "fps" => s.fps = idx(FPS.len()).unwrap_or(3),
+                "auto_hide" => s.auto_hide = v == "1",
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
                         s.shown[i] = c == '1';
@@ -174,8 +232,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.auto_hide), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -216,6 +274,11 @@ enum Dir {
 /// Everything positioned in window DIPs.
 struct Layout {
     clock: Option<R>, // clock cell (pill) or clock area (card header)
+    rec: R,           // record button
+    mascot: R,        // the living helper icon (click: explain mode)
+    gear: R,          // settings button (same menu as right-click)
+    strip: Option<R>, // live transcript strip (while recording / until dismissed)
+    music: Option<R>, // now-playing cell (only while something plays or is paused)
     vertical: bool,
     pill: R,
     cells: Vec<(usize, R)>,
@@ -287,6 +350,8 @@ fn main() {
             guard = Some(CreateMutexW(None, true, w!("Local\\ResourcePill.Single")));
         }
         let _guard = guard;
+        explainui::repair_cursors(); // last run ended with glowing cursors (crash): restore them
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); // cover art + voice
         admin::spawn_cpu_temp();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         dark_menus();
@@ -339,8 +404,8 @@ fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_RBUTTONUP => {
-                menu(hwnd);
+            WM_RBUTTONUP | WM_APP_MENU => {
+                with(|a| a.toggle_settings()); // the in-pill settings panel
                 return LRESULT(0);
             }
             WM_TRAY => {
@@ -348,7 +413,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     WM_LBUTTONUP => {
                         with(|a| a.set_visible(!a.want_visible));
                     }
-                    WM_RBUTTONUP | WM_CONTEXTMENU => menu(hwnd),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => settings::native_menu(hwnd), // tray: works while the pill is hidden
                     _ => {}
                 }
                 return LRESULT(0);
@@ -387,12 +452,31 @@ struct Fonts {
     title: IDWriteTextFormat,
     detail: IDWriteTextFormat,
     small: IDWriteTextFormat,
+    wrap: IDWriteTextFormat, // multi-line text (explanations)
     clock: IDWriteTextFormat,
     c_clock: IDWriteTextFormat,
     clock_big: IDWriteTextFormat,
     big: IDWriteTextFormat,
     row: IDWriteTextFormat,
     row_val: IDWriteTextFormat,
+    icon: IDWriteTextFormat, // Segoe Fluent Icons (MDL2 Assets on Windows 10)
+    icon_big: IDWriteTextFormat,
+}
+
+/// Centred icon-font format: Segoe Fluent Icons on Windows 11, MDL2 Assets on 10 (same code points).
+fn icon_fmt(dw: &IDWriteFactory, size: f32) -> Option<IDWriteTextFormat> {
+    unsafe {
+        let mut fonts = None;
+        let _ = dw.GetSystemFontCollection(&mut fonts, false);
+        let (mut idx, mut found) = (0u32, BOOL(0));
+        let fluent = fonts.is_some_and(|c| c.FindFamilyName(w!("Segoe Fluent Icons"), &mut idx, &mut found).is_ok() && found.as_bool());
+        let family = if fluent { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
+        let f = dw.CreateTextFormat(family, None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us")).ok()?;
+        let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        Some(f)
+    }
 }
 
 struct App {
@@ -409,6 +493,7 @@ struct App {
     brush: ID2D1SolidColorBrush,
     round: ID2D1StrokeStyle,
     f: Fonts,
+    dw: IDWriteFactory,
 
     memdc: HDC,
     bmp: HBITMAP,
@@ -425,6 +510,28 @@ struct App {
     open: f32,
     hl: [f32; 4],
     hl_a: f32,
+    rec: recorder::Recorder,
+    job: Option<recorder::Job>,
+    explain_mode: bool,
+    strip_expanded: bool, // click the live transcript to see more lines
+    menu_open: bool,
+    gear_hover: bool,
+    settings: Option<Vec<usize>>, // open settings panel: path into the item tree
+    settings_cache: Vec<settings::MI>,
+    settings_scroll: f32,
+    settings_hover: Option<usize>,
+    nav_t: f32, // 0..1 slide-in after navigating
+    tuck: f32, // 0 = shown, 1 = tucked into the screen edge (animated)
+    tucked: bool, // target of `tuck`
+    near_at: Instant, // last time the mouse was at the pill (auto-hide waits a moment after)
+    pop: Option<explainui::Pop>, // explain tooltip by the highlight
+    media: Option<(Arc<Mutex<media::Now>>, mpsc::Sender<media::Cmd>)>,
+    now: media::Now, // copy for drawing
+    art: Option<ID2D1Bitmap>, // decoded cover of `now`
+    music_open: bool,
+    voice: Option<windows::Win32::Media::Speech::ISpVoice>,
+    blink_at: Option<Instant>,
+    vram_total: f64,
     fade: f32,
     want_visible: bool,
     last_frame: Instant,
@@ -434,12 +541,14 @@ struct App {
     // dragging: cursor offset inside the pill as a fraction, so it survives orientation changes
     press: Option<(POINT, (f32, f32))>,
     dragging: bool,
+    vol_drag: bool, // pressing on the player's volume slider
     tracking: bool,
 
     // clock + hourly sheen
     time_text: String,
     date_text: String,
     hour: Option<u16>,
+    half_past: Option<bool>, // was the clock past :30 at the last check
     sheen: f32, // progress 0..1 while playing, < 0 when idle
 
 }
@@ -486,12 +595,20 @@ impl App {
                 title: fmt(13.5, semi, l)?,
                 detail: fmt(11.0, normal, t)?,
                 small: fmt(10.5, normal, l)?,
+                wrap: {
+                    let w = fmt(12.5, normal, l)?;
+                    let _ = w.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                    let _ = w.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    w
+                },
                 clock: fmt(15.0, semi, l)?,
                 c_clock: fmt(13.5, semi, c)?,
                 clock_big: fmt(22.0, semi, l)?,
                 big: fmt(18.0, semi, l)?,
                 row: fmt(12.0, normal, l)?,
                 row_val: fmt(12.0, semi, t)?,
+                icon: icon_fmt(&dw, 13.0)?,
+                icon_big: icon_fmt(&dw, 18.0)?,
             };
             let shared = Arc::new(Shared {
                 snap: Mutex::new(Snap::default()),
@@ -513,6 +630,7 @@ impl App {
                 brush,
                 round,
                 f,
+                dw: dw.clone(),
                 memdc: CreateCompatibleDC(None),
                 bmp: HBITMAP::default(),
                 old: HGDIOBJ::default(),
@@ -526,6 +644,28 @@ impl App {
                 open: 0.0,
                 hl: [0.0; 4],
                 hl_a: 0.0,
+                rec: recorder::Recorder::new(),
+                job: None,
+                explain_mode: false,
+                strip_expanded: false,
+                menu_open: false,
+                gear_hover: false,
+                settings: None,
+                settings_cache: Vec::new(),
+                settings_scroll: 0.0,
+                settings_hover: None,
+                nav_t: 1.0,
+                tuck: 0.0,
+                tucked: false,
+                near_at: Instant::now(),
+                pop: None,
+                media: None,
+                now: media::Now::default(),
+                art: None,
+                music_open: false,
+                voice: None,
+                blink_at: None,
+                vram_total: 0.0,
                 fade: 0.0,
                 want_visible: true,
                 last_frame: Instant::now(),
@@ -533,10 +673,12 @@ impl App {
                 alpha: 1.0,
                 press: None,
                 dragging: false,
+                vol_drag: false,
                 tracking: false,
                 time_text: String::new(),
                 date_text: String::new(),
                 hour: None,
+                half_past: None,
                 sheen: 0.0, // play once at startup
             })
         }
@@ -551,6 +693,11 @@ impl App {
             }
             // Ctrl+Alt+M toggles. If another app owns it, the tray icon still works.
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'M' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_REC, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_EXPLAIN, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'E' as u32);
+            SetTimer(Some(self.hwnd), TIMER_BLINK, 3000, None);
+            self.sync_edge_timer();
+            self.vram_total = recorder::vram_total();
             self.tray(NIM_ADD);
             if autostart() {
                 set_autostart(true); // keep the path current if the exe moved
@@ -559,6 +706,7 @@ impl App {
             self.wake = Some(stats::spawn(self.shared.clone(), move || {
                 let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_DATA, WPARAM(0), LPARAM(0));
             }));
+            self.media = Some(media::spawn(self.hwnd, WM_APP_MEDIA));
             if self.cfg.card {
                 self.select(self.shown()[0]);
             }
@@ -581,7 +729,16 @@ impl App {
         self.date_text = if n > 1 { String::from_utf16_lossy(&buf[..n as usize - 1]) } else { String::new() };
         if self.hour.is_some_and(|h| h != now.wHour) {
             self.sheen = 0.0; // on the hour
+            if self.cfg.chime {
+                extras::play_chime();
+            }
         }
+        // half past: a softer, different ding (the hourly chime covers :00)
+        let half = now.wMinute >= 30;
+        if self.half_past.is_some_and(|h| !h) && half && self.hour == Some(now.wHour) && self.cfg.half_chime {
+            extras::play_half_chime();
+        }
+        self.half_past = Some(half);
         self.hour = Some(now.wHour);
     }
 
@@ -631,78 +788,125 @@ impl App {
         if self.cfg.card {
             (CARD_W, CARD_HEAD + s.len() as f32 * CARD_ROW + self.list_h())
         } else if vertical {
-            (V_PILL, s.len() as f32 * V_SEG + PAD * 2.0 + if self.cfg.clock { CLOCK_V } else { 0.0 })
+            (V_PILL, s.len() as f32 * V_SEG + PAD * 2.0 + GEAR_V + REC_V + MASCOT_V + if self.cfg.clock { CLOCK_V } else { 0.0 } + if self.now.present { MUSIC_V } else { 0.0 })
         } else {
-            (s.iter().map(|&i| H_SEG[i]).sum::<f32>() + PAD * 2.0 + if self.cfg.clock { CLOCK_W } else { 0.0 }, H_PILL)
+            (s.iter().map(|&i| H_SEG[i]).sum::<f32>() + PAD * 2.0 + GEAR_W + REC_W + MASCOT_W + if self.cfg.clock { CLOCK_W } else { 0.0 } + if self.now.present { MUSIC_W } else { 0.0 }, H_PILL)
         }
     }
 
+    fn strip_visible(&self) -> bool {
+        self.rec.state != recorder::State::Idle || self.job.is_some()
+    }
+
     fn layout(&self) -> Layout {
-        if self.cfg.card {
-            let (w, h) = self.pill_size(false);
-            let cells = self
-                .shown()
-                .into_iter()
-                .enumerate()
-                .map(|(n, i)| (i, R { x: M + 8.0, y: M + CARD_HEAD + n as f32 * CARD_ROW, w: w - 16.0, h: CARD_ROW }))
-                .collect();
-            return Layout {
-                clock: Some(R { x: M + 20.0, y: M + 8.0, w: 200.0, h: CARD_HEAD - 12.0 }),
-                vertical: false,
-                pill: R { x: M, y: M, w, h },
-                cells,
-                panel: R::default(),
-                dir: Dir::Down,
-                win_w: w + M * 2.0,
-                win_h: h + M * 2.0,
-            };
-        }
-        let vertical = self.cfg.vertical;
+        let vertical = self.cfg.vertical && !self.cfg.card;
         let (pw, ph) = self.pill_size(vertical);
         let mut cells = Vec::new();
-        let mut off = PAD;
-        let clock = self.cfg.clock.then(|| {
-            let r = if vertical { R { x: 0.0, y: off, w: pw, h: CLOCK_V } } else { R { x: off, y: 0.0, w: CLOCK_W, h: ph } };
-            off += if vertical { CLOCK_V } else { CLOCK_W };
-            r
-        });
-        for i in self.shown() {
-            if vertical {
-                cells.push((i, R { x: 0.0, y: off, w: pw, h: V_SEG }));
-                off += V_SEG;
-            } else {
-                cells.push((i, R { x: off, y: 0.0, w: H_SEG[i], h: ph }));
-                off += H_SEG[i];
+        let mut clock = None;
+        let rec;
+        let mascot;
+        let gear;
+        let mut music = None;
+        if self.cfg.card {
+            for (n, i) in self.shown().into_iter().enumerate() {
+                cells.push((i, R { x: 8.0, y: CARD_HEAD + n as f32 * CARD_ROW, w: pw - 16.0, h: CARD_ROW }));
+            }
+            clock = Some(R { x: 20.0, y: 8.0, w: 200.0, h: CARD_HEAD - 12.0 });
+            rec = R { x: pw - 48.0, y: 8.0, w: 34.0, h: 32.0 };
+            mascot = R { x: pw - 86.0, y: 8.0, w: 36.0, h: 32.0 };
+            gear = R { x: pw - 122.0, y: 8.0, w: 34.0, h: 32.0 };
+        } else {
+            let mut off = PAD;
+            gear = if vertical { R { x: 0.0, y: off, w: pw, h: GEAR_V } } else { R { x: off, y: 0.0, w: GEAR_W, h: ph } };
+            off += if vertical { GEAR_V } else { GEAR_W };
+            if self.cfg.clock {
+                clock = Some(if vertical { R { x: 0.0, y: off, w: pw, h: CLOCK_V } } else { R { x: off, y: 0.0, w: CLOCK_W, h: ph } });
+                off += if vertical { CLOCK_V } else { CLOCK_W };
+            }
+            rec = if vertical { R { x: 0.0, y: off, w: pw, h: REC_V } } else { R { x: off, y: 0.0, w: REC_W, h: ph } };
+            off += if vertical { REC_V } else { REC_W };
+            mascot = if vertical { R { x: 0.0, y: off, w: pw, h: MASCOT_V } } else { R { x: off, y: 0.0, w: MASCOT_W, h: ph } };
+            off += if vertical { MASCOT_V } else { MASCOT_W };
+            for i in self.shown() {
+                if vertical {
+                    cells.push((i, R { x: 0.0, y: off, w: pw, h: V_SEG }));
+                    off += V_SEG;
+                } else {
+                    cells.push((i, R { x: off, y: 0.0, w: H_SEG[i], h: ph }));
+                    off += H_SEG[i];
+                }
+            }
+            if self.now.present {
+                music = Some(if vertical { R { x: 0.0, y: off, w: pw, h: MUSIC_V } } else { R { x: off, y: 0.0, w: MUSIC_W, h: ph } });
             }
         }
-        // Panel goes toward the side of the screen with room, and is kept on screen.
+        // Extras (transcript strip, then the details panel) go toward the side of the screen with room.
         let (px, py) = self.cfg.pos.unwrap_or((0, 0));
         let wa = work_area(POINT { x: px + (pw * self.scale) as i32 / 2, y: py + (ph * self.scale) as i32 / 2 });
         let rel = |v: i32, o: i32| (v - o) as f32 / self.scale; // screen px → DIPs relative to pill
         let (wl, wr, wt, wb) = (rel(wa.left, px), rel(wa.right, px), rel(wa.top, py), rel(wa.bottom, py));
-        let panel_w = if vertical { PANEL_W } else { pw.max(PANEL_W) };
-        let anchor = cells.iter().find(|c| c.0 == self.panel_sel).or(cells.first()).map(|c| c.1).unwrap_or_default();
-        let (dir, mut panel) = if vertical {
-            let right = (pw / 2.0 - wl) < (wr - pw / 2.0); // open toward the roomier side
-            let x = if right { pw + GAP } else { -GAP - panel_w };
-            let y = anchor.y + anchor.h / 2.0 - self.list_h() / 2.0;
-            (if right { Dir::Right } else { Dir::Left }, R { x, y, w: panel_w, h: self.list_h() })
+        let dir = if vertical {
+            if (pw / 2.0 - wl) < (wr - pw / 2.0) { Dir::Right } else { Dir::Left }
+        } else if (ph / 2.0 - wt) < (wb - ph / 2.0) {
+            Dir::Down
         } else {
-            let down = (ph / 2.0 - wt) < (wb - ph / 2.0);
-            let y = if down { ph + GAP } else { -GAP - self.list_h() };
-            (if down { Dir::Down } else { Dir::Up }, R { x: (pw - panel_w) / 2.0, y, w: panel_w, h: self.list_h() })
+            Dir::Up
         };
-        panel.x = panel.x.clamp(wl + EDGE, (wr - EDGE - panel.w).max(wl + EDGE));
-        if vertical {
-            panel.y = panel.y.clamp(wt + EDGE, (wb - EDGE - panel.h).max(wt + EDGE));
+        let side_w = if vertical { PANEL_W } else { pw.max(PANEL_W) };
+        let clamp_x = |x: f32, w: f32| x.clamp(wl + EDGE, (wr - EDGE - w).max(wl + EDGE));
+        let strip = self.strip_visible().then(|| {
+            let (x, y) = match dir {
+                Dir::Down => ((pw - side_w) / 2.0, ph + GAP),
+                Dir::Up => ((pw - side_w) / 2.0, -GAP - self.strip_h(side_w)),
+                Dir::Right => (pw + GAP, 0.0),
+                Dir::Left => (-GAP - side_w, 0.0),
+            };
+            R { x: clamp_x(x, side_w), y, w: side_w, h: self.strip_h(side_w) }
+        });
+        let used = strip.map_or(0.0, |s| s.h + GAP); // the panel goes beyond the strip
+        let anchor = if self.music_open { music } else { None }.or(cells.iter().find(|c| c.0 == self.panel_sel).or(cells.first()).map(|c| c.1)).unwrap_or_default();
+        let lh = if self.settings.is_some() {
+            self.settings_h()
+        } else if self.music_open {
+            MUSIC_PANEL_H
+        } else {
+            self.list_h()
+        };
+        let mut panel = match dir {
+            Dir::Down => R { x: (pw - side_w) / 2.0, y: ph + GAP + used, w: side_w, h: lh },
+            Dir::Up => R { x: (pw - side_w) / 2.0, y: -GAP - used - lh, w: side_w, h: lh },
+            Dir::Right | Dir::Left => {
+                let x = if dir == Dir::Right { pw + GAP } else { -GAP - side_w };
+                R { x, y: (anchor.y + anchor.h / 2.0 - lh / 2.0).max(used), w: side_w, h: lh }
+            }
+        };
+        if let (true, false, Some(m)) = (self.music_open && self.settings.is_none(), vertical, music) {
+            panel.w = PANEL_W; // the player sits under its own cell, not the whole pill's width
+            panel.x = m.x + m.w / 2.0 - PANEL_W / 2.0;
         }
-        // window = union(pill, panel) + margin; shift everything into window space
-        let (l, t) = (panel.x.min(0.0), panel.y.min(0.0));
-        let (r, b) = ((panel.x + panel.w).max(pw), (panel.y + panel.h).max(ph));
+        panel.x = clamp_x(panel.x, panel.w);
+        if vertical {
+            panel.y = panel.y.clamp((wt + EDGE).max(used), (wb - EDGE - panel.h).max(wt + EDGE));
+        }
+        // window = union(pill, strip, panel if it can show) + margin; shift everything into window space
+        let mut parts = vec![R { x: 0.0, y: 0.0, w: pw, h: ph }];
+        parts.extend(strip);
+        if !self.cfg.card || self.settings.is_some() {
+            parts.push(panel);
+        }
+        let l = parts.iter().map(|r| r.x).fold(0.0f32, f32::min);
+        let t = parts.iter().map(|r| r.y).fold(0.0f32, f32::min);
+        let r = parts.iter().map(|r| r.x + r.w).fold(pw, f32::max);
+        let b = parts.iter().map(|r| r.y + r.h).fold(ph, f32::max);
         let (ox, oy) = (M - l, M - t);
         let mv = |r: R| R { x: r.x + ox, y: r.y + oy, ..r };
         Layout {
             clock: clock.map(mv),
+            rec: mv(rec),
+            mascot: mv(mascot),
+            gear: mv(gear),
+            strip: strip.map(mv),
+            music: music.map(mv),
             vertical,
             pill: R { x: ox, y: oy, w: pw, h: ph },
             cells: cells.into_iter().map(|(i, r)| (i, mv(r))).collect(),
@@ -764,6 +968,11 @@ impl App {
             match msg {
                 WM_APP_DATA => {
                     self.snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    // short notes ("highlight some text first", "key saved") clear themselves after 8 s
+                    if self.job.as_ref().is_some_and(|j| j.kind == recorder::JobKind::Explain && j.state == recorder::JobState::Failed && j.at.elapsed().as_secs() >= 8) {
+                        self.job = None;
+                        self.after_rec_change();
+                    }
                     // the card's list can grow (e.g. one row per drive): keep it on screen
                     if self.cfg.card && self.press.is_none() {
                         if let Some((x, y)) = self.cfg.pos {
@@ -771,7 +980,9 @@ impl App {
                         }
                     }
                     if self.want_visible {
-                        let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        if !self.menu_open {
+                            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        }
                         // Full animations: rings and bars glide to the new values (~0.3 s), then the timer stops.
                         // Reduced: one frame per data tick, the lowest possible CPU.
                         self.update_clock();
@@ -810,7 +1021,66 @@ impl App {
                         }
                     }
                 }
-                WM_HOTKEY if wp.0 as i32 == HOTKEY => self.set_visible(!self.want_visible),
+                WM_HOTKEY if wp.0 as i32 == HOTKEY => self.toggle_tuck(), // tuck to the edge / bring back
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_REC => self.toggle_record(),
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_EXPLAIN => self.explain_now(), // highlight, then press
+                WM_MOUSEWHEEL if self.settings.is_none() && self.now.present => {
+                    // over the music cell or the player: volume
+                    let mut c = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+                    let _ = ScreenToClient(self.hwnd, &mut c);
+                    let (x, y) = (c.x as f32 / self.scale, c.y as f32 / self.scale);
+                    let lay = self.layout();
+                    if lay.music.is_some_and(|m| m.contains(x, y)) || (self.music_open && lay.panel.contains(x, y)) {
+                        self.volume_step(((wp.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0);
+                    }
+                }
+                WM_MOUSEWHEEL if self.settings.is_some() => {
+                    let panel = self.layout().panel;
+                    self.settings_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16, panel);
+                }
+                WM_APP_JOB => {
+                    let was_running = self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running);
+                    if self.job.as_mut().is_some_and(|j| j.pump()) {
+                        let answer = self.job.as_ref().filter(|j| was_running && j.kind == recorder::JobKind::Explain && j.state == recorder::JobState::Done).map(|j| j.text.clone());
+                        if let Some(a) = answer.filter(|_| self.cfg.voice) {
+                            self.speak(&a);
+                        }
+                        self.after_rec_change();
+                    }
+                }
+                WM_TIMER if wp.0 == TIMER_TIP => self.hide_tip(),
+                explainui::WM_APP_SELECT if self.explain_mode => self.show_tip(explainui::unpack(lp)),
+                explainui::WM_APP_DOWN => {
+                    let (x, y) = explainui::unpack(lp);
+                    let r = self.pop.as_ref().map(|p| p.rect()).unwrap_or_default();
+                    if !(x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
+                        self.hide_tip(); // clicked elsewhere
+                    }
+                }
+                explainui::WM_APP_POPCLICK => self.tip_click(explainui::unpack(lp).0),
+                WM_TIMER if wp.0 == TIMER_EDGE => self.edge_tick(),
+                WM_TIMER if wp.0 == TIMER_BLINK => {
+                    // blink, then schedule the next one 2.5-7 s later
+                    self.blink_at = Some(Instant::now());
+                    let next = 2500 + (windows::Win32::System::SystemInformation::GetTickCount() % 4500);
+                    SetTimer(Some(self.hwnd), TIMER_BLINK, next, None);
+                    self.kick();
+                }
+                WM_APP_MEDIA => self.media_changed(),
+                WM_APP_SCRIBE => {
+                    let was_done = matches!(self.rec.state, recorder::State::Done);
+                    if self.rec.pump() {
+                        if !was_done && matches!(self.rec.state, recorder::State::Done) {
+                            self.cue(extras::Cue::Saved);
+                        }
+                        self.after_rec_change();
+                    }
+                }
+                WM_TIMER if wp.0 == TIMER_PULSE => {
+                    if self.fade > 0.0 && !self.anim_on {
+                        self.render();
+                    }
+                }
                 WM_APP_SHOW => self.set_visible(true),
                 WM_APP_DPI | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
                     // monitor, DPI, resolution or taskbar changed: rescale and pull back on screen
@@ -824,6 +1094,21 @@ impl App {
                     }
                     self.render();
                     return if msg == WM_SETTINGCHANGE { None } else { Some(LRESULT(0)) };
+                }
+                WM_LBUTTONDOWN if self.tucked => self.toggle_tuck(), // tap the edge line: back
+                WM_LBUTTONDOWN if self.music_open && { let (x, y) = self.dip(lp); self.volume_hit(x, y, self.layout().panel) } => {
+                    self.vol_drag = true;
+                    SetCapture(self.hwnd);
+                    let (x, _) = self.dip(lp);
+                    self.volume_at(x, self.layout().panel);
+                }
+                WM_MOUSEMOVE if self.vol_drag => {
+                    let (x, _) = self.dip(lp);
+                    self.volume_at(x, self.layout().panel);
+                }
+                WM_LBUTTONUP if self.vol_drag => {
+                    self.vol_drag = false;
+                    let _ = ReleaseCapture();
                 }
                 WM_LBUTTONDOWN => {
                     let mut c = POINT::default();
@@ -850,15 +1135,21 @@ impl App {
                         }
                     } else {
                         let h = self.hit(lp);
-                        if h != self.hover {
+                        let (x, y) = self.dip(lp);
+                        let lay = self.layout();
+                        let g = lay.gear.contains(x, y);
+                        let sh = self.settings.is_some() && self.settings_hover_at(x, y, lay.panel);
+                        if h != self.hover || g != self.gear_hover || sh {
                             self.hover = h;
+                            self.gear_hover = g;
                             self.render();
                         }
                     }
                 }
                 WM_MOUSELEAVE => {
                     self.tracking = false;
-                    if self.hover != NONE {
+                    let was_gear = std::mem::take(&mut self.gear_hover);
+                    if self.hover != NONE || was_gear {
                         self.hover = NONE;
                         self.render();
                     }
@@ -868,7 +1159,34 @@ impl App {
                     if self.press.take().is_some() {
                         if self.dragging {
                             self.cfg.save();
+                            // thrown against the screen edge: tuck it there
+                            let mut c = POINT::default();
+                            let _ = GetCursorPos(&mut c);
+                            let m = monitor_rect(c);
+                            let z = (6.0 * self.scale) as i32;
+                            if c.y - m.top < z || m.bottom - 1 - c.y < z || c.x - m.left < z || m.right - 1 - c.x < z {
+                                self.toggle_tuck();
+                            }
                         } else {
+                            let (x, y) = self.dip(lp);
+                            let lay = self.layout();
+                            if self.settings.is_some() && lay.panel.contains(x, y) {
+                                self.settings_click(x, y, lay.panel);
+                                self.dragging = false;
+                                return Some(LRESULT(0));
+                            } else if self.music_open && lay.panel.contains(x, y) {
+                                self.music_panel_click(x, y, lay.panel);
+                            } else if let Some(m) = lay.music.filter(|m| m.contains(x, y)) {
+                                self.music_cell_click(x, y, m, lay.vertical);
+                            } else if lay.gear.contains(x, y) {
+                                let _ = PostMessageW(Some(self.hwnd), WM_APP_MENU, WPARAM(0), LPARAM(0));
+                            } else if lay.mascot.contains(x, y) {
+                                self.mascot_click();
+                            } else if lay.rec.contains(x, y) {
+                                self.toggle_record();
+                            } else if let Some(s) = lay.strip.filter(|s| s.contains(x, y)) {
+                                self.strip_click(x, y, s);
+                            }
                             let h = self.hit(lp);
                             if h != NONE {
                                 // the card always shows a top-apps list; the pill toggles its panel
@@ -878,8 +1196,17 @@ impl App {
                     }
                     self.dragging = false;
                 }
-                WM_LBUTTONDBLCLK => self.set_card(!self.cfg.card),
+                WM_LBUTTONDBLCLK => {
+                    // not on the record button or transcript: those are plain buttons
+                    let (x, y) = self.dip(lp);
+                    let lay = self.layout();
+                    let on_panel = (self.settings.is_some() || self.music_open) && lay.panel.contains(x, y);
+                    if !on_panel && !lay.music.is_some_and(|m| m.contains(x, y)) && !lay.rec.contains(x, y) && !lay.mascot.contains(x, y) && !lay.gear.contains(x, y) && !lay.strip.is_some_and(|s| s.contains(x, y)) {
+                        self.set_card(!self.cfg.card);
+                    }
+                }
                 WM_CAPTURECHANGED => {
+                    self.vol_drag = false;
                     if self.press.take().is_some() && self.dragging {
                         self.cfg.save();
                     }
@@ -924,7 +1251,305 @@ impl App {
         self.layout().cells.iter().find(|c| c.1.contains(x, y)).map_or(NONE, |c| c.0)
     }
 
+    /// Record button / Ctrl+Alt+R: start, or stop (the helper then saves and summarises).
+    fn toggle_record(&mut self) {
+        use recorder::State;
+        match self.rec.state {
+            State::Recording => {
+                self.rec.stop();
+                self.cue(extras::Cue::RecStop);
+            }
+            State::Finishing => {} // already wrapping up
+            _ => {
+                let asr = recorder::ASR[self.cfg.asr.min(recorder::ASR.len() - 1)].0;
+                let llm = recorder::LLM.get(self.cfg.llm).map(|(d, f, _)| recorder::models_dir().join(d).join(f)).filter(|p| p.exists());
+                let h = self.hwnd.0 as isize;
+                let notify = move || unsafe {
+                    let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_SCRIBE, WPARAM(0), LPARAM(0));
+                };
+                let final_asr = if self.cfg.final_pass { recorder::final_model() } else { None };
+                let gemini = if self.cfg.tx_cloud { extras::load_key("gemini") } else { None };
+                match self.rec.start(asr, llm, final_asr, self.cfg.keep_audio, gemini, notify) {
+                    Ok(_) => self.cue(extras::Cue::RecStart),
+                    Err(e) => {
+                        self.rec.state = State::Failed;
+                        self.rec.status = e;
+                    }
+                }
+            }
+        }
+        self.after_rec_change();
+    }
+
+    fn cue(&self, c: extras::Cue) {
+        if self.cfg.cues {
+            extras::play_cue(c);
+        }
+    }
+
+    /// Milliseconds per frame for the chosen frame rate (Appearance → Frame rate).
+    fn frame_ms(&self) -> u32 {
+        1000 / FPS[self.cfg.fps.min(FPS.len() - 1)]
+    }
+
+    /// Smooth frames (at the chosen frame rate) only while something on screen moves: work in progress (pulse,
+    /// lively mascot), music (dancing bars, progress, the shimmering edge line) or Peter's sparkle.
+    /// Nothing moving (or the pill hidden): no timer at all.
+    pub fn sync_pulse(&self) {
+        // "Reduced" animations: only work in progress animates (as before); music and the sparkle hold still
+        let ambient = self.cfg.anim == 0 && (self.now.playing || (!self.tucked && self.cloud_ai()));
+        let moving = self.working() || ambient;
+        unsafe {
+            if moving && self.want_visible {
+                SetTimer(Some(self.hwnd), TIMER_PULSE, self.frame_ms(), None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_PULSE);
+            }
+        }
+    }
+
+    /// Something is working: recording, explaining, downloading, or waiting for a highlight.
+    fn working(&self) -> bool {
+        self.rec.busy() || self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running)
+    }
+
+    /// Keep timers, size and position in step with the recorder, jobs and explain mode.
+    fn after_rec_change(&mut self) {
+        self.sync_pulse();
+        unsafe {
+            if let Some((x, y)) = self.cfg.pos {
+                self.place_at(x, y, None); // the strip changes the footprint
+            }
+            self.render();
+        }
+    }
+
+    /// Strip height: the transcript is fixed; an explanation grows with its text.
+    fn strip_h(&self, w: f32) -> f32 {
+        let Some(job) = &self.job else { return if self.strip_expanded { 32.0 + STRIP_LINES_BIG as f32 * 21.0 + 10.0 } else { STRIP_H } };
+        if job.kind == recorder::JobKind::Download {
+            return 76.0;
+        }
+        let text: Vec<u16> = job.text.encode_utf16().collect();
+        let h = unsafe {
+            self.dw
+                .CreateTextLayout(&text, &self.f.wrap, w - 28.0, 1000.0)
+                .ok()
+                .and_then(|l| {
+                    let mut m = DWRITE_TEXT_METRICS::default();
+                    l.GetMetrics(&mut m).ok().map(|_| m.height)
+                })
+                .unwrap_or(40.0)
+        };
+        (58.0 + h + 12.0).clamp(84.0, 320.0)
+    }
+
+    fn job_notify(&self) -> impl Fn() + Send + 'static {
+        let h = self.hwnd.0 as isize;
+        move || unsafe {
+            let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_JOB, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// Mascot click: explain mode on/off. While on, cursors glow and each highlight gets a tooltip.
+    fn mascot_click(&mut self) {
+        if self.explain_mode {
+            self.end_explain_mode();
+        } else {
+            self.explain_mode = true;
+            explainui::cursors_on(self.theme().accent[0]);
+            explainui::hook_on(self.hwnd);
+        }
+        self.after_rec_change();
+    }
+
+    fn end_explain_mode(&mut self) {
+        if std::mem::take(&mut self.explain_mode) {
+            explainui::hook_off();
+            explainui::cursors_off();
+        }
+        self.hide_tip();
+    }
+
+    fn hide_tip(&mut self) {
+        if let Some(p) = &self.pop {
+            p.hide();
+        }
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_TIP);
+        }
+    }
+
+    /// The little "✦ Explain | ⌕ Search" tooltip, just below where the highlight ended.
+    fn show_tip(&mut self, (x, y): (i32, i32)) {
+        if self.pop.is_none() {
+            self.pop = explainui::Pop::create();
+        }
+        let s = self.scale;
+        let (w, h) = ((TIP_W * s).ceil() as i32, (TIP_H * s).ceil() as i32);
+        let Some(pop) = self.pop.as_mut() else { return };
+        if !pop.ensure(w, h) {
+            return;
+        }
+        let memdc = pop.memdc;
+        let th = self.theme();
+        unsafe {
+            self.rt.SetDpi(96.0 * s, 96.0 * s);
+            if self.rt.BindDC(memdc, &RECT { left: 0, top: 0, right: w, bottom: h }).is_err() {
+                return;
+            }
+            self.rt.BeginDraw();
+            self.rt.Clear(Some(&color(0, 0.0)));
+            self.alpha = 1.0;
+            let r = R { x: 1.0, y: 1.0, w: TIP_W - 2.0, h: TIP_H - 2.0 };
+            let bg = if th.glass { 0x1C1C22 } else { th.bg };
+            self.rt.FillRoundedRectangle(&self.rrect(r, r.h / 2.0), self.color(bg, 0.96));
+            self.rt.DrawRoundedRectangle(&self.rrect(r, r.h / 2.0), self.color(th.accent[0], 0.9), 1.4, None);
+            let half = TIP_W / 2.0;
+            self.rt.DrawLine(pt(half, 8.0), pt(half, TIP_H - 8.0), self.color(th.fg, 0.25), 1.0, None);
+            let fg = if th.glass { 0xFFFFFF } else { th.fg };
+            self.text("✦ Explain", &self.f.c_value, R { x: 0.0, y: 0.0, w: half, h: TIP_H }, fg, 1.0);
+            self.text("⌕ Search", &self.f.c_value, R { x: half, y: 0.0, w: half, h: TIP_H }, fg, 1.0);
+            let _ = self.rt.EndDraw(None, None);
+            // below the end of the highlight, kept on its monitor
+            let m = work_area(POINT { x, y });
+            let at = POINT { x: (x - w / 2).clamp(m.left, m.right - w), y: if y + 18 + h < m.bottom { y + 18 } else { y - 18 - h } };
+            if let Some(pop) = &self.pop {
+                pop.present(at);
+            }
+            self.cue(extras::Cue::Tip);
+            SetTimer(Some(self.hwnd), TIMER_TIP, 6000, None);
+        }
+        unsafe { self.render() }; // the shared render target goes back to the pill
+    }
+
+    /// Tooltip click: left half explains, right half searches the web.
+    fn tip_click(&mut self, x: i32) {
+        let w = self.pop.as_ref().map_or(0, |p| p.size.0);
+        self.hide_tip();
+        if x < w / 2 {
+            self.explain_now();
+        } else if let Some(text) = extras::grab_selection(self.hwnd) {
+            let q: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
+            let url = format!("https://www.google.com/search?q={}", explainui::url_encode(&q));
+            unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+        }
+    }
+
+    /// A cloud AI is chosen and its key is stored (Peter looks different then).
+    fn cloud_ai(&self) -> bool {
+        (self.cfg.explain == 1 && extras::has_key("anthropic")) || ((self.cfg.explain == 2 || self.cfg.tx_cloud) && extras::has_key("gemini"))
+    }
+
+    /// Peter's voice: Windows' built-in text-to-speech (free, offline), replacing anything still being said.
+    fn speak(&mut self, text: &str) {
+        use windows::Win32::Media::Speech::*;
+        if self.voice.is_none() {
+            self.voice = unsafe { windows::Win32::System::Com::CoCreateInstance(&SpVoice, None, windows::Win32::System::Com::CLSCTX_ALL) }.ok();
+        }
+        if let Some(v) = &self.voice {
+            let flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | if text.is_empty() { 0 } else { SPF_IS_NOT_XML.0 }) as u32;
+            unsafe {
+                let _ = v.Speak(&HSTRING::from(text), flags, None);
+            }
+        }
+    }
+
+    fn hush(&mut self) {
+        if self.voice.is_some() {
+            self.speak("");
+        }
+    }
+
+    /// Grab the highlighted text from whichever app is in front and explain it.
+    fn explain_now(&mut self) {
+        self.hush();
+        let text = extras::grab_selection(self.hwnd);
+        let fail = |a: &mut App, msg: &str| {
+            a.job = Some(recorder::Job::note(recorder::JobKind::Explain, "Explain", msg));
+            a.after_rec_change();
+        };
+        let Some(text) = text else {
+            fail(self, "Highlight some text first, then click the helper (or press Ctrl+Alt+E).");
+            return;
+        };
+        let text: String = text.chars().take(4000).collect(); // a highlight, not a document
+        let cloud = match self.cfg.explain {
+            1 => extras::load_key("anthropic").map(|k| ("claude", k, "Explain · Claude")),
+            2 => extras::load_key("gemini").map(|k| ("gemini", k, "Explain · Gemini")),
+            _ => None,
+        };
+        if cloud.is_none() && self.cfg.explain != 0 {
+            let who = if self.cfg.explain == 2 { "Gemini" } else { "Claude" };
+            fail(self, &format!("{who} is selected but no {who} key is stored. Copy your key, then Settings → AI & API keys → Paste API key."));
+            return;
+        }
+        let (how, input, title) = match cloud {
+            Some((how, k, title)) => (how, format!("{k}\n{text}"), title),
+            None => ("local", format!("\n{text}"), "Explain · on this PC"),
+        };
+        let mut args = vec!["--explain".to_string(), how.to_string()];
+        if how == "local" {
+            let Some(gguf) = recorder::LLM.iter().map(|(d, f, _)| recorder::models_dir().join(d).join(f)).find(|p| p.exists()) else {
+                fail(self, "No local text model installed. Add one from Model library → Text.");
+                return;
+            };
+            args.extend(["--llm".to_string(), gguf.to_string_lossy().into_owned()]);
+        }
+        let notify = self.job_notify();
+        self.job = match recorder::Job::start(recorder::JobKind::Explain, title.into(), text, &args, Some(input), notify) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                fail(self, &e);
+                return;
+            }
+        };
+        self.after_rec_change();
+    }
+
+    fn start_download(&mut self, id: &'static str) {
+        let Some(m) = catalog::find(id) else { return };
+        if self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) {
+            return; // one at a time
+        }
+        let notify = self.job_notify();
+        let args = vec!["--download".to_string(), id.to_string()];
+        self.job = recorder::Job::start(recorder::JobKind::Download, format!("{} · {} MB", m.name, m.size_mb), String::new(), &args, None, notify).ok();
+        self.after_rec_change();
+    }
+
+    /// Strip clicks: × dismisses; after a recording, clicking opens the summary (or transcript).
+    fn strip_click(&mut self, x: f32, y: f32, s: R) {
+        if self.job.is_some() {
+            let close = x > s.x + s.w - 30.0 && y < s.y + 28.0;
+            if close || self.job.as_ref().is_some_and(|j| j.state != recorder::JobState::Running) {
+                self.job = None; // closing a running download cancels it; it resumes next time
+                self.hush();
+                self.after_rec_change();
+            }
+            return;
+        }
+        let close = x > s.x + s.w - 30.0 && y < s.y + 28.0;
+        if self.rec.busy() && !close {
+            self.strip_expanded = !self.strip_expanded; // see more (or less) of the live transcript
+            self.after_rec_change();
+            return;
+        }
+        if !close {
+            // the Recordings window: transcript, summary and audio in one place
+            recorder::open_viewer(self.rec.folder.as_deref());
+        }
+        if !self.rec.busy() {
+            self.rec.state = recorder::State::Idle;
+            self.after_rec_change();
+        }
+    }
+
     fn select(&mut self, i: usize) {
+        if i != NONE {
+            self.settings = None; // details, settings and the player share the panel
+            self.music_open = false;
+        }
         if i != NONE {
             if self.hl_a < 0.05 {
                 if let Some(c) = self.layout().cells.iter().find(|c| c.0 == i) {
@@ -975,13 +1600,14 @@ impl App {
             }
         }
         self.kick();
+        self.sync_pulse();
     }
 
     /// Start the ~60 fps animation timer; it stops itself once everything settles.
     fn kick(&mut self) {
         if !self.anim_on {
             self.last_frame = Instant::now();
-            self.anim_on = unsafe { SetTimer(Some(self.hwnd), TIMER_ANIM, 15, None) } != 0;
+            self.anim_on = unsafe { SetTimer(Some(self.hwnd), TIMER_ANIM, self.frame_ms(), None) } != 0;
             if !self.anim_on {
                 self.step();
                 unsafe { self.render() };
@@ -1005,9 +1631,11 @@ impl App {
         for i in 0..5 {
             go(&mut self.disp[i], self.snap.frac[i], 16.0, 0.003);
         }
-        let open = self.sel != NONE;
+        let open = self.sel != NONE || self.settings.is_some() || self.music_open;
         go(&mut self.open, if open { 1.0 } else { 0.0 }, 14.0, 0.003);
-        go(&mut self.hl_a, if open { 1.0 } else { 0.0 }, 14.0, 0.003);
+        go(&mut self.hl_a, if self.sel != NONE { 1.0 } else { 0.0 }, 14.0, 0.003);
+        go(&mut self.nav_t, 1.0, 16.0, 0.003);
+        go(&mut self.tuck, if self.tucked { 1.0 } else { 0.0 }, 9.0, 0.003);
         if open {
             if let Some(c) = self.layout().cells.iter().find(|c| c.0 == self.sel) {
                 let t = [c.1.x, c.1.y, c.1.w, c.1.h];
@@ -1017,6 +1645,9 @@ impl App {
             }
         }
         go(&mut self.fade, if self.want_visible { 1.0 } else { 0.0 }, 12.0, 0.003);
+        if self.blink_at.is_some_and(|t| t.elapsed().as_secs_f32() < 0.24) {
+            moving = true; // keep frames coming for the blink
+        }
         if self.sheen >= 0.0 {
             self.sheen += dt / 1.6; // 1.6 s sweep
             if self.sheen >= 1.0 {
@@ -1098,21 +1729,35 @@ impl App {
             }
             self.rt.BeginDraw();
             self.rt.Clear(Some(&color(0, 0.0)));
+            self.alpha = 1.0 - self.tuck; // the pill fades as it tucks away, leaving the edge line
+            if self.alpha > 0.005 {
+                // fully tucked: only the edge line is visible, so skip drawing the rest
+                if self.cfg.card {
+                    self.draw_card(&lay);
+                } else {
+                    self.draw_pill(&lay);
+                }
+                if let Some(s) = lay.strip {
+                    if self.job.is_some() {
+                        self.draw_job_strip(s);
+                    } else {
+                        self.draw_strip(s);
+                    }
+                }
+                let metric_panel = !self.cfg.card && self.panel_sel != NONE && self.cfg.shown[self.panel_sel];
+                if self.open > 0.003 && (self.settings.is_some() || self.music_open || metric_panel) {
+                    self.draw_panel(&lay);
+                }
+            }
             self.alpha = 1.0;
-            if self.cfg.card {
-                self.draw_card(&lay);
-            } else {
-                self.draw_pill(&lay);
-            }
-            if !self.cfg.card && self.open > 0.003 && self.panel_sel != NONE && self.cfg.shown[self.panel_sel] {
-                self.draw_panel(&lay);
-            }
+            self.draw_edge_line(&lay);
             if self.rt.EndDraw(None, None).is_err() {
                 return;
             }
             // window position derives from the pill position so the pill never moves when the panel flips sides
             let (px, py) = self.cfg.pos.unwrap_or((0, 0));
-            let dst = POINT { x: px - (lay.pill.x * self.scale).round() as i32, y: py - (lay.pill.y * self.scale).round() as i32 };
+            let (sx, sy) = self.tuck_shift(&lay); // edge tuck slides the whole window
+            let dst = POINT { x: px - (lay.pill.x * self.scale).round() as i32 + (sx as f32 * self.tuck) as i32, y: py - (lay.pill.y * self.scale).round() as i32 + (sy as f32 * self.tuck) as i32 };
             let size = SIZE { cx: pw, cy: ph };
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
@@ -1158,6 +1803,232 @@ impl App {
                     self.rt.FillRoundedRectangle(&self.rrect(r, rad), &b);
                 }
             }
+        }
+    }
+
+    /// Record button: ring + dot at rest, a pulsing red dot while recording, a spinner while finishing.
+    fn draw_rec(&self, r: R) {
+        use recorder::State;
+        let th = self.theme();
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let t = self.rec.started.elapsed().as_secs_f32();
+        let circle = |rad: f32| D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad, radiusY: rad };
+        unsafe {
+            match self.rec.state {
+                State::Recording => {
+                    let p = ((t * std::f32::consts::TAU / 1.4).sin() + 1.0) / 2.0;
+                    self.rt.FillEllipse(&circle(8.0 + 4.0 * p), self.color(th.hot, 0.28 * (1.0 - p)));
+                    self.rt.FillEllipse(&circle(6.5), self.color(th.hot, 1.0));
+                }
+                State::Finishing => {
+                    self.rt.DrawEllipse(&circle(7.5), self.color(th.fg, 0.12), 2.2, None);
+                    // a quarter arc turning once a second
+                    if let Some(g) = self.arc_from(cx, cy, 7.5, t * std::f32::consts::TAU, 0.28) {
+                        self.rt.DrawGeometry(&g, self.color(th.accent[0], 1.0), 2.2, &self.round);
+                    }
+                }
+                _ => {
+                    self.rt.DrawEllipse(&circle(8.0), self.color(th.fg, 0.45), 1.6, None);
+                    self.rt.FillEllipse(&circle(4.0), self.color(th.hot, 0.9));
+                }
+            }
+        }
+    }
+
+    /// The living helper: a glossy blob with eyes. Idle it blinks now and then; while working it
+    /// bobs and looks around; in explain mode its eyes follow your cursor.
+    fn draw_mascot(&self, r: R, pill: R) {
+        let th = self.theme();
+        let t = (unsafe { windows::Win32::System::SystemInformation::GetTickCount() } % 3_600_000) as f32 / 1000.0;
+        let working = self.working();
+        let bob = if working { (t * 5.0).sin() * 1.3 } else { 0.0 };
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0 + bob);
+        let rad = 11.0;
+        // where the eyes look
+        let (lx, ly) = if self.explain_mode {
+            let mut c = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut c);
+            }
+            let (px, py) = self.cfg.pos.unwrap_or((0, 0));
+            let lay_x = px as f32 + (cx - pill.x) * self.scale;
+            let lay_y = py as f32 + (cy - pill.y) * self.scale;
+            let (dx, dy) = (c.x as f32 - lay_x, c.y as f32 - lay_y);
+            let d = (dx * dx + dy * dy).sqrt().max(1.0);
+            (dx / d, dy / d)
+        } else if working {
+            ((t * 1.7).sin(), (t * 1.1).cos() * 0.4)
+        } else {
+            (0.0, 0.0)
+        };
+        let blink = self.blink_at.map_or(1.0, |b| {
+            let e = b.elapsed().as_secs_f32();
+            if e < 0.24 { (1.0 - (e / 0.12 - 1.0).abs()).mul_add(-0.85, 1.0) } else { 1.0 }
+        });
+        let body = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad, radiusY: rad * 0.94 };
+        unsafe {
+            if working || self.explain_mode {
+                let glow = 0.5 + 0.5 * (t * 3.0).sin();
+                self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad + 3.5, radiusY: rad + 3.5 }, self.color(th.accent[0], 0.10 + 0.12 * glow));
+            }
+            // two solid fills instead of a per-frame gradient brush: same look, far cheaper
+            self.rt.FillEllipse(&body, self.color(th.accent[0], 1.0));
+            self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx + 3.0, cy + 3.0), radiusX: rad * 0.72, radiusY: rad * 0.68 }, self.color(th.accent[1], 0.55));
+            // glossy highlight
+            self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx - 4.0, cy - 5.5), radiusX: 4.0, radiusY: 2.2 }, self.color(0xFFFFFF, 0.35));
+            for side in [-1.0f32, 1.0] {
+                let ex = cx + side * 3.8;
+                let ey = cy - 0.5;
+                self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(ex, ey), radiusX: 2.7, radiusY: 3.3 * blink }, self.color(0xFFFFFF, 0.97));
+                if blink > 0.4 {
+                    self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(ex + lx * 1.1, ey + ly * 1.3), radiusX: 1.35, radiusY: 1.5 * blink }, self.color(0x101018, 1.0));
+                }
+            }
+            // cloud AI on (a stored key in use): a halo ring and a twinkling sparkle
+            if self.cloud_ai() {
+                self.rt.DrawEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad + 2.2, radiusY: rad * 0.94 + 2.2 }, self.color(th.accent[1], 0.85), 1.2, None);
+                let tw = 0.75 + 0.25 * (t * 2.3).sin();
+                let (sx, sy, s) = (cx + rad * 0.85, cy - rad * 0.95, 3.6 * tw);
+                if let Ok(g) = self.d2d.CreatePathGeometry() {
+                    if let Ok(sink) = g.Open() {
+                        // four-point star
+                        sink.BeginFigure(pt(sx, sy - s), D2D1_FIGURE_BEGIN_FILLED);
+                        for (x, y) in [(0.28, -0.28), (1.0, 0.0), (0.28, 0.28), (0.0, 1.0), (-0.28, 0.28), (-1.0, 0.0), (-0.28, -0.28)] {
+                            sink.AddLine(pt(sx + x * s, sy + y * s));
+                        }
+                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                        if sink.Close().is_ok() {
+                            self.rt.FillGeometry(&g, self.color(0xFFFFFF, 0.95), None);
+                        }
+                    }
+                }
+            }
+            // mouth: a small smile, an "o" while working
+            if working {
+                self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx, cy + 5.2), radiusX: 1.4, radiusY: 1.2 + 0.4 * (t * 6.0).sin().abs() }, self.color(0x101018, 0.8));
+            } else if let Some(g) = self.arc_from(cx, cy + 2.2, 3.2, 0.5, 0.3) {
+                self.rt.DrawGeometry(&g, self.color(0x101018, 0.75), 1.2, &self.round);
+            }
+        }
+    }
+
+    /// Settings button: a small gear (opens the same menu as right-clicking).
+    fn draw_gear(&self, r: R) {
+        let th = self.theme();
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let hover = self.gear_hover;
+        let a = if hover { 0.95 } else { 0.6 };
+        unsafe {
+            if hover {
+                self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 12.0, radiusY: 12.0 }, self.color(th.fg, 0.08));
+            }
+            self.rt.DrawEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 4.6, radiusY: 4.6 }, self.color(th.fg, a), 1.8, None);
+            for k in 0..8 {
+                let ang = k as f32 * std::f32::consts::TAU / 8.0 + 0.2;
+                let (c, s) = (ang.cos(), ang.sin());
+                self.rt.DrawLine(pt(cx + c * 6.0, cy + s * 6.0), pt(cx + c * 8.2, cy + s * 8.2), self.color(th.fg, a), 2.2, &self.round);
+            }
+            self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 1.6, radiusY: 1.6 }, self.color(th.fg, a));
+        }
+    }
+
+    /// Explain answer or download progress, in the strip.
+    fn draw_job_strip(&self, s: R) {
+        use recorder::{JobKind, JobState};
+        let Some(job) = &self.job else { return };
+        let th = self.theme();
+        unsafe { self.surface(s, 16.0) };
+        let (x, w) = (s.x + 14.0, s.w - 28.0);
+        let tc = if job.state == JobState::Failed { th.hot } else { th.fg };
+        self.text(&job.title, &self.f.label, R { x, y: s.y + 9.0, w: w - 24.0, h: 14.0 }, th.fg, 0.75);
+        self.text("×", &self.f.title, R { x: s.x + s.w - 30.0, y: s.y + 4.0, w: 20.0, h: 22.0 }, th.fg, 0.55);
+        match job.kind {
+            JobKind::Explain => {
+                if !job.query.is_empty() {
+                    let q: String = job.query.split_whitespace().collect::<Vec<_>>().join(" ");
+                    self.text(&format!("“{q}”"), &self.f.row, R { x, y: s.y + 28.0, w, h: 18.0 }, th.accent[0], 0.9);
+                }
+                let wy = s.y + 52.0;
+                let w16: Vec<u16> = job.text.encode_utf16().collect();
+                unsafe {
+                    self.rt.DrawText(&w16, &self.f.wrap, &R { x, y: wy, w, h: s.y + s.h - wy - 8.0 }.d2d(), self.color(tc, 0.92), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+            }
+            JobKind::Download => {
+                let (done, total) = job.progress;
+                let f = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                let bar = R { x, y: s.y + 34.0, w, h: 6.0 };
+                unsafe {
+                    self.rt.FillRoundedRectangle(&self.rrect(bar, 3.0), self.color(th.fg, 0.10));
+                    let fill = if job.state == JobState::Done { 1.0 } else { f };
+                    if fill > 0.0 {
+                        self.rt.FillRoundedRectangle(&self.rrect(R { w: (bar.w * fill).max(6.0), ..bar }, 3.0), self.color(if job.state == JobState::Failed { th.hot } else { th.accent[0] }, 1.0));
+                    }
+                }
+                let mb = |b: u64| b as f64 / 1_048_576.0;
+                let detail = if job.state == JobState::Running && total > 0 { format!("{}  ·  {:.0} of {:.0} MB", job.text, mb(done), mb(total)) } else { job.text.clone() };
+                self.text(&detail, &self.f.row, R { x, y: s.y + 46.0, w, h: 18.0 }, tc, 0.85);
+            }
+        }
+    }
+
+    /// Live transcript: status line, then the latest lines labelled by speaker.
+    fn draw_strip(&self, s: R) {
+        use recorder::State;
+        let th = self.theme();
+        unsafe { self.surface(s, 16.0) };
+        let rec = &self.rec;
+        let (x, w) = (s.x + 14.0, s.w - 28.0);
+        let header = match rec.state {
+            State::Recording => {
+                let e = rec.started.elapsed().as_secs();
+                let n = rec.speakers.len();
+                format!("REC {:02}:{:02} · {} · {}", e / 60, e % 60, if n == 1 { "1 speaker".into() } else { format!("{n} speakers") }, rec.status)
+            }
+            _ => rec.status.clone(),
+        };
+        let hc = if rec.state == State::Failed { th.hot } else { th.fg };
+        if rec.state == State::Recording {
+            let p = ((rec.started.elapsed().as_secs_f32() * std::f32::consts::TAU / 1.4).sin() + 1.0) / 2.0;
+            unsafe { self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(x + 4.0, s.y + 16.0), radiusX: 4.0, radiusY: 4.0 }, self.color(th.hot, 0.6 + 0.4 * p)) };
+            self.text(&header, &self.f.label, R { x: x + 14.0, y: s.y + 9.0, w: w - 14.0, h: 14.0 }, hc, 0.75);
+        } else {
+            self.text(&header, &self.f.label, R { x, y: s.y + 9.0, w: w - 24.0, h: 14.0 }, hc, 0.85);
+            self.text("×", &self.f.title, R { x: s.x + s.w - 30.0, y: s.y + 4.0, w: 20.0, h: 22.0 }, th.fg, 0.55);
+        }
+        let lines_max = if self.strip_expanded { STRIP_LINES_BIG } else { 3 };
+        let shown: Vec<_> = rec.lines.iter().rev().take(lines_max).collect();
+        if shown.is_empty() {
+            let hint = if rec.state == State::Recording { "Speech from your mic and your PC will appear here" } else { "" };
+            self.text(hint, &self.f.row, R { x, y: s.y + 34.0, w, h: 18.0 }, th.fg, 0.4);
+        }
+        for (n, line) in shown.iter().rev().enumerate() {
+            let y = s.y + 32.0 + n as f32 * 21.0;
+            let fade = if shown.len() == lines_max && n == 0 { 0.55 } else { 1.0 }; // oldest line dimmer
+            let k = rec.speakers.iter().position(|w| *w == line.who).unwrap_or(0);
+            let c = if line.who == "You" { th.accent[0] } else { th.accent[1 + k % 4] };
+            self.text(&line.who, &self.f.label, R { x, y: y + 1.0, w: 66.0, h: 16.0 }, c, fade);
+            self.text(&line.text, &self.f.row, R { x: x + 70.0, y, w: w - 70.0, h: 18.0 }, th.fg, 0.92 * fade);
+        }
+    }
+
+    /// Arc of `frac` of a circle starting at angle `a0` (radians).
+    fn arc_from(&self, cx: f32, cy: f32, r: f32, a0: f32, frac: f32) -> Option<ID2D1PathGeometry> {
+        unsafe {
+            let g = self.d2d.CreatePathGeometry().ok()?;
+            let sink = g.Open().ok()?;
+            let a1 = a0 + frac * std::f32::consts::TAU;
+            sink.BeginFigure(pt(cx + r * a0.cos(), cy + r * a0.sin()), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: pt(cx + r * a1.cos(), cy + r * a1.sin()),
+                size: D2D_SIZE_F { width: r, height: r },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: if frac > 0.5 { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+            });
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close().ok()?;
+            Some(g)
         }
     }
 
@@ -1212,6 +2083,12 @@ impl App {
         let rad = if lay.vertical { p.w / 2.0 } else { p.h / 2.0 };
         unsafe {
             self.surface(p, rad);
+            self.draw_rec(lay.rec);
+            self.draw_mascot(lay.mascot, lay.pill);
+            self.draw_gear(lay.gear);
+            if let Some(m) = lay.music {
+                self.draw_music_cell(m, lay.vertical);
+            }
             if let Some(cr) = lay.clock {
                 self.draw_clock(cr, lay.vertical, false);
             }
@@ -1312,9 +2189,17 @@ impl App {
         unsafe {
             self.alpha = e;
             self.surface(r, 18.0);
+            if self.settings.is_some() {
+                // settings stay easy to read whatever the pill opacity: back the panel nearly solid
+                self.rt.FillRoundedRectangle(&self.rrect(r, 18.0), self.color(self.theme().bg, 0.85));
+            }
             self.rt.PushAxisAlignedClip(&R { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 6.0 }.d2d(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             self.alpha = e * e;
-            self.draw_top(x, y, w, ps, TITLES[ps]);
+            if self.settings.is_some() {
+                self.draw_settings(r, full);
+            } else {
+                if self.music_open { self.draw_music_panel(x, y, w) } else { self.draw_top(x, y, w, ps, TITLES[ps]) }
+            }
             self.rt.PopAxisAlignedClip();
             self.alpha = 1.0;
         }
@@ -1374,6 +2259,9 @@ impl App {
         let s = &self.snap;
         unsafe {
             self.surface(c, 20.0);
+            self.draw_rec(lay.rec);
+            self.draw_mascot(lay.mascot, lay.pill);
+            self.draw_gear(lay.gear);
             if let Some(cr) = lay.clock {
                 self.draw_clock(cr, false, true);
             } else {
@@ -1382,8 +2270,8 @@ impl App {
             let live = format!("Live · every {}", INTERVALS[self.cfg.interval].0);
             // right column: date over refresh rate (the big time sits on the left)
             let (top, bottom) = if self.cfg.clock { (self.date_text.as_str(), live.as_str()) } else { (live.as_str(), "") };
-            self.text(top, &self.f.detail, R { x: c.x + 160.0, y: c.y + 9.0, w: c.w - 180.0, h: 16.0 }, th.fg, 0.7);
-            self.text(bottom, &self.f.detail, R { x: c.x + 160.0, y: c.y + 24.0, w: c.w - 180.0, h: 14.0 }, th.fg, 0.4);
+            self.text(top, &self.f.detail, R { x: c.x + 160.0, y: c.y + 9.0, w: c.w - 304.0, h: 16.0 }, th.fg, 0.7);
+            self.text(bottom, &self.f.detail, R { x: c.x + 160.0, y: c.y + 24.0, w: c.w - 304.0, h: 14.0 }, th.fg, 0.4);
             if let Some(r) = lay.cells.iter().find(|r| r.0 == self.hover && r.0 != self.sel) {
                 self.rt.FillRoundedRectangle(&self.rrect(r.1, 14.0), self.color(th.fg, 0.04));
             }
@@ -1483,6 +2371,11 @@ impl App {
 
     /// Apply a menu command. Returns false for unknown ids.
     fn command(&mut self, id: u32) {
+        self.run_command(id);
+        self.sync_pulse(); // a setting may start or stop an animation (e.g. Peter's AI sparkle)
+    }
+
+    fn run_command(&mut self, id: u32) {
         let id = id as usize;
         match id {
             1 => self.set_visible(!self.want_visible),
@@ -1537,13 +2430,94 @@ impl App {
             704 => self.cfg.clock = !self.cfg.clock,
             705 => {
                 self.sheen = 0.0;
+                if self.cfg.chime {
+                    extras::play_chime();
+                }
                 self.kick();
                 return;
             }
+            706 => self.cfg.chime = !self.cfg.chime,
+            707 => self.cfg.half_chime = !self.cfg.half_chime,
+            711 => self.cfg.cues = !self.cfg.cues,
+            712 => self.cfg.voice = !self.cfg.voice,
+            1210 | 1211 => self.cfg.tx_cloud = id == 1211,
+            709 => {
+                self.cfg.auto_hide = !self.cfg.auto_hide;
+                self.sync_edge_timer();
+            }
+            710 => {
+                self.toggle_tuck();
+                return;
+            }
+            708 => {
+                extras::play_half_chime();
+                return;
+            }
+            1300 => {
+                self.explain_now();
+                return;
+            }
+            1310..=1312 => self.cfg.explain = id as usize - 1310,
+            1320 => {
+                let key = extras::clipboard_text(self.hwnd).unwrap_or_default().trim().to_string();
+                let provider = extras::key_provider(&key).filter(|p| extras::save_key(p, &key));
+                if let Some(p) = provider {
+                    extras::set_clipboard_text(self.hwnd, ""); // do not leave the key lying on the clipboard
+                    self.cfg.explain = if p == "gemini" { 2 } else { 1 };
+                }
+                let msg = if provider.is_some() {
+                    format!("Saved {} · encrypted so only your Windows account can read it", extras::mask(&key))
+                } else if key.is_empty() {
+                    "The clipboard has no text. Copy your key (Ctrl+C), then choose Paste again".into()
+                } else {
+                    "That doesn't look like an API key. Copy just the key (Anthropic sk-ant-…, or Gemini from aistudio.google.com/apikey), then choose Paste again".into()
+                };
+                self.job = Some(recorder::Job::note(recorder::JobKind::Explain, "API key", &msg));
+                self.after_rec_change();
+            }
+            1321 | 1322 => {
+                let gemini = id == 1322;
+                extras::remove_key(if gemini { "gemini" } else { "anthropic" });
+                if self.cfg.explain == if gemini { 2 } else { 1 } {
+                    self.cfg.explain = 0;
+                }
+            }
+            1400..=1498 if id - 1400 < catalog::MODELS.len() => {
+                let m = &catalog::MODELS[id - 1400];
+                if !recorder::models_dir().join(m.id).join(m.marker).exists() {
+                    self.start_download(m.id);
+                }
+                return;
+            }
+            1499 => {
+                let dir = recorder::models_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(dir.as_os_str()), None, None, SW_SHOWNORMAL) };
+                return;
+            }
             910..=911 => self.cfg.anim = id - 910,
+            920..=923 => self.cfg.fps = id - 920,
             900..=902 => {
                 self.cfg.smooth = id - 900;
                 self.shared.smoothing.store(self.cfg.smooth as u32, Ordering::Relaxed);
+            }
+            1000..=1099 if id - 1000 < recorder::ASR.len() => self.cfg.asr = id - 1000,
+            1100..=1199 if id - 1100 <= recorder::LLM.len() => self.cfg.llm = id - 1100,
+            1204 => {
+                recorder::open_viewer(None);
+                return;
+            }
+            1202 => self.cfg.final_pass = !self.cfg.final_pass,
+            1203 => self.cfg.keep_audio = !self.cfg.keep_audio,
+            1200 => {
+                let dir = recorder::recordings_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(dir.as_os_str()), None, None, SW_SHOWNORMAL) };
+                return;
+            }
+            1201 => {
+                self.toggle_record();
+                return;
             }
             800 => {
                 self.set_card(!self.cfg.card);
@@ -1589,6 +2563,11 @@ impl App {
 
     unsafe fn quit(&mut self) {
         unsafe {
+            // an active recording keeps going in the helper until its files are saved
+            if self.rec.busy() {
+                self.rec.stop();
+            }
+            self.end_explain_mode(); // normal cursors back, hook removed
             self.cfg.save();
             let nid = NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: self.hwnd, uID: 1, ..Default::default() };
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
@@ -1612,59 +2591,16 @@ impl Drop for App {
     }
 }
 
-/// Context menu, shown outside the App borrow because TrackPopupMenu pumps messages.
-unsafe fn menu(hwnd: HWND) {
+// ---------- helpers ----------
+
+/// Full monitor rectangle (the screen edge the pill tucks into).
+fn monitor_rect(p: POINT) -> RECT {
     unsafe {
-        let Some(cfg) = with(|a| (a.cfg.clone(), a.want_visible)) else { return };
-        let (cfg, visible) = cfg;
-        let Ok(m) = CreatePopupMenu() else { return };
-        let item = |menu: HMENU, id: usize, text: &str, checked: bool| {
-            let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
-            let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
-        };
-        let sub = |title: &str, fill: &dyn Fn(HMENU)| {
-            if let Ok(s) = CreatePopupMenu() {
-                fill(s);
-                let _ = AppendMenuW(m, MF_POPUP, s.0 as usize, &HSTRING::from(title));
-            }
-        };
-        item(m, 1, if visible { "Hide\tCtrl+Alt+M" } else { "Show\tCtrl+Alt+M" }, false);
-        item(m, 800, if cfg.card { "Switch to pill\tDouble-click" } else { "Switch to card (larger window)\tDouble-click" }, false);
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        sub("Theme", &|s| THEMES.iter().enumerate().for_each(|(i, t)| item(s, 100 + i, t.name, cfg.theme == i)));
-        sub("Metrics", &|s| LABELS.iter().enumerate().for_each(|(i, l)| item(s, 200 + i, l, cfg.shown[i])));
-        sub("Size", &|s| SIZES.iter().enumerate().for_each(|(i, z)| item(s, 300 + i, z.0, cfg.size == i)));
-        sub("Background opacity", &|s| OPACITY.iter().enumerate().for_each(|(i, o)| item(s, 400 + i, o.0, cfg.opacity == i)));
-        sub("Refresh rate", &|s| INTERVALS.iter().enumerate().for_each(|(i, v)| item(s, 500 + i, v.0, cfg.interval == i)));
-        sub("Animations", &|s| ANIMS.iter().enumerate().for_each(|(i, v)| item(s, 910 + i, v, cfg.anim == i)));
-        item(m, 704, "Show clock", cfg.clock);
-        item(m, 705, "Play the hourly animation", false);
-        sub("Smoothing", &|s| SMOOTH.iter().enumerate().for_each(|(i, v)| item(s, 900 + i, v, cfg.smooth == i)));
-        sub("Snap to", &|s| PLACES.iter().enumerate().for_each(|(i, p)| item(s, 600 + i, p, false)));
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        item(m, 700, "Vertical when docked to a side", cfg.side_layout);
-        item(m, 701, "Click-through (unlock from tray)", cfg.click_through);
-        if cfg.admin_mode {
-            let _ = AppendMenuW(m, MF_STRING | MF_CHECKED | MF_GRAYED, 702, w!("Start with Windows (admin task)"));
-        } else {
-            item(m, 702, "Start with Windows", autostart());
-        }
-        item(m, 703, "Admin mode: CPU && SATA temperatures", cfg.admin_mode);
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        item(m, 999, "Quit", false);
-        let mut p = POINT::default();
-        let _ = GetCursorPos(&mut p);
-        let _ = SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, None, hwnd, None).0;
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(m); // destroys submenus too
-        if cmd > 0 {
-            with(|a| a.command(cmd as u32));
-        }
+        let mon = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() { mi.rcMonitor } else { RECT { left: 0, top: 0, right: 1920, bottom: 1080 } }
     }
 }
-
-// ---------- helpers ----------
 
 fn work_area(p: POINT) -> RECT {
     unsafe {
@@ -1816,17 +2752,23 @@ fn make_icon() -> HICON {
     }
 }
 
+/// Serialises tests that change process environment variables (APPDATA).
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn settings_roundtrip_and_garbage() {
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, pos: Some((-100, 50)) };
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, auto_hide: true, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
         let l = Settings::load();
-        assert_eq!((l.theme, l.shown, l.size, l.opacity, l.interval, l.vertical, l.card, l.smooth, l.clock, l.anim, l.pos), (4, s.shown, 2, 3, 0, true, true, 2, false, 1, Some((-100, 50))));
+        assert_eq!((l.theme, l.shown, l.size, l.opacity, l.interval, l.vertical, l.card, l.smooth, l.pos), (4, s.shown, 2, 3, 0, true, true, 2, Some((-100, 50))));
+        assert_eq!((l.clock, l.anim, l.asr, l.llm, l.chime, l.explain, l.final_pass, l.keep_audio, l.cues, l.tx_cloud, l.voice, l.fps), (false, 1, 1, 2, false, 1, false, true, false, true, false, 1));
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
         let g = Settings::load();

@@ -41,6 +41,7 @@ pub struct Snap {
     pub ready: bool,
     pub net_rate: f64, // bytes/s, down + up
     pub disk_label: String, // busiest drive, e.g. "DISK C:"
+    pub vram_used: f64, // bytes of dedicated GPU memory in use (all processes)
     pub temp: [Option<f64>; 5], // °C per metric slot: CPU, GPU, busiest DISK (RAM/NET unused)
 }
 
@@ -282,6 +283,8 @@ struct Sampler {
     smooth_k: f64,
     temp_drives: Vec<u32>, // drives that report a temperature
     temp_probe_at: Option<Instant>,
+    temp_read_at: Option<Instant>,
+    drive_temps: HashMap<u32, f64>,
     elevated: bool,
 }
 
@@ -301,6 +304,8 @@ impl Sampler {
             smooth_k: 1.0,
             temp_drives: Vec::new(),
             temp_probe_at: None,
+            temp_read_at: None,
+            drive_temps: HashMap::new(),
             elevated: crate::admin::is_elevated(),
         }
     }
@@ -371,6 +376,7 @@ impl Sampler {
         let gpu = per_engine.values().fold(0.0f64, |a, &b| a.max(b)).clamp(0.0, 100.0);
         let gpu = self.smooth(1, gpu);
         let vram: f64 = self.pdh.array(self.pdh.vram).iter().map(|(_, v)| v).sum();
+        s.vram_used = vram;
         s.frac[GPU] = gpu as f32 / 100.0;
         s.text[GPU] = format!("{gpu:.0}%");
         s.temp[GPU] = crate::temps::gpu();
@@ -401,10 +407,13 @@ impl Sampler {
             self.temp_drives = disks.iter().map(|d| d.index()).filter(|&n| self.drive_temp(n).is_some()).collect();
             self.temp_probe_at = Some(Instant::now());
         }
+        // drive sensors (SMART on SATA) are read every 10 s; temperatures change slowly
+        if self.temp_read_at.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+            self.drive_temps = self.temp_drives.iter().filter_map(|&n| Some((n, self.drive_temp(n)?))).collect();
+            self.temp_read_at = Some(Instant::now());
+        }
         for d in &mut disks {
-            if self.temp_drives.contains(&d.index()) {
-                d.temp = self.drive_temp(d.index());
-            }
+            d.temp = self.drive_temps.get(&d.index()).copied();
         }
         let (dr, dw) = disks.iter().fold((0.0, 0.0), |(r, w), d| (r + d.read, w + d.write));
         let busiest = disks.iter().max_by(|a, b| a.active.total_cmp(&b.active));

@@ -58,7 +58,7 @@ pub fn spawn_cpu_temp() {
                 logged = true;
             }
             CPU_TEMP.store(t.ok().filter(|t| (1.0..125.0).contains(t)).unwrap_or(f64::NAN).to_bits(), Ordering::Relaxed);
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(2)); // temperature changes slowly; each read asks the SMU
         }
     });
 }

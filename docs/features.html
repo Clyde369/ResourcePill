@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every feature · Peter the Pill</title>
+<meta name="description" content="Everything Peter the Pill does: resource monitoring, temperatures, meeting recording and transcription, explain-anything highlights, music controls, edge tucking, themes and more.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html" aria-label="Peter the Pill home">
+      <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><defs><radialGradient id="g" cx="62%" cy="62%" r="70%"><stop offset="0" stop-color="#a78bfa"/><stop offset=".8" stop-color="#38d6f5"/></radialGradient></defs><circle cx="15" cy="15" r="13" fill="url(#g)"/><ellipse cx="10.5" cy="14" rx="3" ry="3.6" fill="#fff"/><ellipse cx="19.5" cy="14" rx="3" ry="3.6" fill="#fff"/><circle cx="11.2" cy="14.8" r="1.5" fill="#101018"/><circle cx="20.2" cy="14.8" r="1.5" fill="#101018"/></svg>
+      Peter the Pill
+    </a>
+    <div class="links">
+      <a href="features.html" class="active">Features</a>
+      <a href="views.html">Views</a>
+      <a href="peter.html">Meet Peter</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="https://github.com/Clyde369/ResourcePill">GitHub</a>
+    </div>
+    <a class="btn primary small" href="https://github.com/Clyde369/ResourcePill/releases/latest">Download</a>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow"><b>Everything</b> · in one small pill</span>
+    <h1>Every <span class="grad">feature</span>.</h1>
+    <p class="lead" style="margin:0">All of it lives in one bar that floats on top of your screen. Click the gear on the left for settings, or right-click the tray icon.</p>
+    <div class="toc">
+      <a href="#monitor">Monitoring</a><a href="#temps">Temperatures</a><a href="#record">Recording</a><a href="#explain">Explain &amp; search</a><a href="#music">Music</a><a href="#place">Placement &amp; hiding</a><a href="#look">Look &amp; feel</a><a href="#ai">AI &amp; models</a><a href="#system">System</a><a href="#keys">Shortcuts</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="group reveal" id="monitor">
+    <div class="group-title"><div class="icon" style="--c:var(--cyan)">◔</div><h2>Monitoring</h2></div>
+    <div class="list">
+      <div class="item"><b>CPU, RAM, GPU, disk and network</b><span>Live rings and numbers, smoothly animated, with the same data sources Task Manager uses.</span></div>
+      <div class="item"><b>Top 3 apps</b><span>Click any metric to see which apps use the most of it, including protected system processes.</span></div>
+      <div class="item"><b>Every drive</b><span>Each disk is tracked on its own; the pill shows the busiest one.</span></div>
+      <div class="item"><b>Network adapters</b><span>Download and upload speed of your real adapters, and the busiest ones in the panel.</span></div>
+      <div class="item"><b>Card view with graphs</b><span>Double-click for a larger card with 60-second graphs for every metric and the top apps underneath.</span></div>
+      <div class="item"><b>Hot warnings</b><span>Values and labels change colour when something runs near its limit.</span></div>
+      <div class="item"><b>Refresh rate and smoothing</b><span>Pick how often it samples and how much the numbers are smoothed.</span></div>
+      <div class="item"><b>Choose your metrics</b><span>Show only the ones you care about; the pill resizes to fit.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="temps">
+    <div class="group-title"><div class="icon" style="--c:var(--amber)">🌡</div><h2>Temperatures</h2></div>
+    <div class="list">
+      <div class="item"><b>GPU</b><span>From the same source as Task Manager, no extra drivers.</span></div>
+      <div class="item"><b>NVMe drives</b><span>Read straight from the drive.</span></div>
+      <div class="item"><b>CPU (AMD Ryzen)</b><span>Through AMD's Ryzen Master SDK, in admin mode.</span></div>
+      <div class="item"><b>SATA drives</b><span>From the drive's own SMART sensors, in admin mode.</span></div>
+      <div class="item"><b>Admin mode, asked once</b><span>One permission prompt, then it starts at login through a scheduled task with no more prompts.</span></div>
+      <div class="item"><b>Heat labels</b><span>CPU, GPU and disk labels turn red when they get hot.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="record">
+    <div class="group-title"><div class="icon" style="--c:var(--pink)">●</div><h2>Recording &amp; transcription</h2></div>
+    <div class="list">
+      <div class="item"><b>One-tap recording</b><span>The red button (or Ctrl+Alt+R) records everything playing on your PC plus your microphone.</span></div>
+      <div class="item"><b>Live transcript</b><span>A strip under the pill shows what's being said as it happens; click it to see more lines.</span></div>
+      <div class="item"><b>Who said what</b><span>Voices are told apart automatically and labelled; your microphone is labelled "You".</span></div>
+      <div class="item"><b>Accurate pass after stopping</b><span>A second, more careful pass over the whole recording for a cleaner transcript.</span></div>
+      <div class="item"><b>Summary</b><span>Overview, key points, decisions and action items, written by a local model or by Gemini.</span></div>
+      <div class="item"><b>Gemini transcription (optional)</b><span>Send the finished recording to Gemini with your own key; the audio is deleted from Google afterwards.</span></div>
+      <div class="item"><b>Keep the audio</b><span>Save one listenable file of the whole meeting next to the transcript.</span></div>
+      <div class="item"><b>Recordings window</b><span>Browse past recordings with transcript, audio playback and summary in one place, no transcriber needed.</span></div>
+      <div class="item"><b>Soft sounds</b><span>Gentle tones when recording starts, stops and is saved.</span></div>
+      <div class="item"><b>Fully stops when done</b><span>The transcriber exits when you stop, so it uses nothing in the background.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="explain">
+    <div class="group-title"><div class="icon" style="--c:var(--violet)">✦</div><h2>Explain &amp; search</h2></div>
+    <div class="list">
+      <div class="item"><b>One tap to turn on</b><span>Tap Peter once; explain mode stays on until you tap him again.</span></div>
+      <div class="item"><b>Glowing cursor</b><span>Your arrow, text and hand cursors glow while it's on, with zero lag.</span></div>
+      <div class="item"><b>Tooltip by your highlight</b><span>Highlight text in any app and a small Explain | Search tooltip appears right there.</span></div>
+      <div class="item"><b>Explain</b><span>A short, plain answer: definitions for words, what code does, what a sentence means.</span></div>
+      <div class="item"><b>Search</b><span>Opens a web search for the highlighted text.</span></div>
+      <div class="item"><b>Your choice of AI</b><span>On your PC (private, free), Claude or Gemini.</span></div>
+      <div class="item"><b>Read aloud</b><span>Answers can be spoken in Windows' built-in voice, free and offline.</span></div>
+      <div class="item"><b>Shortcut</b><span>Ctrl+Alt+E explains whatever is highlighted, even with the mode off.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="music">
+    <div class="group-title"><div class="icon" style="--c:#34d399">♫</div><h2>Music</h2></div>
+    <div class="list">
+      <div class="item"><b>Works with any player</b><span>Spotify, YouTube in a browser, Media Player and anything that shows in Windows' media controls. No sign-in.</span></div>
+      <div class="item"><b>Now playing on the bar</b><span>Cover art, song, artist and little dancing bars.</span></div>
+      <div class="item"><b>Previous, play/pause, next</b><span>Right on the pill, no need to open anything.</span></div>
+      <div class="item"><b>Progress</b><span>A thin line on the bar, plus time played and time left in the player.</span></div>
+      <div class="item"><b>Player panel</b><span>Big cover art, shuffle and all the controls.</span></div>
+      <div class="item"><b>Volume</b><span>A slider in the player and mouse-wheel over the music; it changes the app's own volume, not the whole PC's.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="place">
+    <div class="group-title"><div class="icon" style="--c:var(--cyan)">⇡</div><h2>Placement &amp; hiding</h2></div>
+    <div class="list">
+      <div class="item"><b>Drag anywhere</b><span>Snaps to edges, corners and centre, and never leaves the screen.</span></div>
+      <div class="item"><b>Multiple monitors</b><span>Moves between screens and stays sharp at every scaling level.</span></div>
+      <div class="item"><b>Vertical on the sides</b><span>Drag it to the left or right edge and it becomes a vertical capsule.</span></div>
+      <div class="item"><b>Swipe to tuck</b><span>Throw it against a screen edge and it slides away, leaving a soft glowing line.</span></div>
+      <div class="item"><b>Tap to bring back</b><span>Tap the line and the pill returns and stays.</span></div>
+      <div class="item"><b>Living line</b><span>The tucked line glides while music plays and breathes red while recording.</span></div>
+      <div class="item"><b>Optional auto-hide</b><span>Tuck automatically when the mouse is away.</span></div>
+      <div class="item"><b>Click-through and hide</b><span>Let clicks pass through it, or hide it completely from the tray.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="look">
+    <div class="group-title"><div class="icon" style="--c:var(--violet)">◐</div><h2>Look &amp; feel</h2></div>
+    <div class="list">
+      <div class="item"><b>8 themes</b><span>Graphite, Midnight, OLED, Glass, Frost, Light, Sunset and Mono.</span></div>
+      <div class="item"><b>Size and opacity</b><span>Make it smaller, bigger or more see-through.</span></div>
+      <div class="item"><b>Frame rate</b><span>15, 25, 30 or 60 fps; higher is smoother and uses a little more CPU.</span></div>
+      <div class="item"><b>Reduced animations</b><span>For the lowest possible CPU use.</span></div>
+      <div class="item"><b>Clock</b><span>Time and date in your Windows format.</span></div>
+      <div class="item"><b>Hourly moment</b><span>On the hour a band of light sweeps across with a soft chime, and a gentler ding at half past.</span></div>
+      <div class="item"><b>Peter</b><span>A small character who blinks, looks around while busy, follows your cursor in explain mode and wears a halo when a cloud AI is on.</span></div>
+      <div class="item"><b>Settings in the pill</b><span>A gear opens a settings panel in the pill's own style; the tray has the same menu.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="ai">
+    <div class="group-title"><div class="icon" style="--c:var(--pink)">⬇</div><h2>AI &amp; models</h2></div>
+    <div class="list">
+      <div class="item"><b>Separate choices</b><span>Pick local or cloud for highlights and for transcription independently.</span></div>
+      <div class="item"><b>Claude and Gemini keys</b><span>Paste a key once; it's recognised automatically and stored encrypted for your Windows account only.</span></div>
+      <div class="item"><b>Model library</b><span>Download speech, text and helper models, sorted into categories.</span></div>
+      <div class="item"><b>Performance predictions</b><span>See how fast each model will run on your machine right now before choosing it.</span></div>
+      <div class="item"><b>GPU when available</b><span>Local summaries use your graphics card if it has room, and the CPU otherwise.</span></div>
+      <div class="item"><b>Unloaded after use</b><span>Models are only in memory while they're working.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="system">
+    <div class="group-title"><div class="icon" style="--c:var(--amber)">⚙</div><h2>System</h2></div>
+    <div class="list">
+      <div class="item"><b>Tiny and native</b><span>Under 1 MB, written in Rust with Direct2D; no browser engine inside.</span></div>
+      <div class="item"><b>Light on resources</b><span>About 2% of one core even while animating, and nothing extra when idle.</span></div>
+      <div class="item"><b>Starts with Windows</b><span>Optional, from the settings.</span></div>
+      <div class="item"><b>Never steals focus</b><span>Clicking the pill doesn't pull you out of the app you're in.</span></div>
+      <div class="item"><b>One copy at a time</b><span>Starting it again just shows the running one.</span></div>
+      <div class="item"><b>Crash-safe</b><span>Built to recover cleanly; your cursors are restored even after an unexpected exit.</span></div>
+    </div>
+  </section>
+
+  <section class="group reveal" id="keys">
+    <div class="group-title"><div class="icon" style="--c:var(--cyan)">⌨</div><h2>Shortcuts</h2></div>
+    <div class="keys">
+      <div class="key"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>M</kbd><span>Tuck to the edge / bring back</span></div>
+      <div class="key"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>R</kbd><span>Start / stop recording</span></div>
+      <div class="key"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>E</kbd><span>Explain the highlighted text</span></div>
+      <div class="key"><kbd>Double-click</kbd><span>Switch between pill and card</span></div>
+      <div class="key"><kbd>Mouse wheel</kbd><span>Over the music: volume</span></div>
+      <div class="key"><kbd>Right-click</kbd><span>Settings</span></div>
+    </div>
+  </section>
+
+  <div class="final reveal">
+    <h2>All of that, in <span class="grad">under 1 MB</span>.</h2>
+    <p class="sub" style="margin:0 auto 30px">Free, private by default, and open source.</p>
+    <a class="btn primary" href="https://github.com/Clyde369/ResourcePill/releases/latest">Download Peter the Pill</a>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Clyde369 · MIT licence</span>
+    <span><a href="https://github.com/Clyde369/ResourcePill">Source on GitHub</a> · Windows 10 &amp; 11</span>
+  </div>
+</footer>
+
+</body>
+</html>
