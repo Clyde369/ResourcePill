@@ -15,6 +15,8 @@ mod mixer;
 mod duck;
 mod snapshot;
 mod keyboard;
+mod bundle;
+mod setup;
 #[allow(dead_code)] // download fields are used by the helper
 mod catalog;
 
@@ -174,6 +176,8 @@ struct Settings {
     duck_roles: String, // your auto-lower roles per app, e.g. "chrome=l;spotify=i" (the rest: automatic)
     art_tint: bool, // tint the pill with the song cover's colours
     kbd_show: bool, // show how the keyboard is connected (Bluetooth, cable, disconnected)
+    guide_done: bool, // the first-run setup guide has been seen
+    rec_dir: String, // where recordings go (empty: the default, Documents/ResourcePill/Recordings)
     auto_hide: bool, // tuck into the screen edge when the mouse is away
     keep_audio: bool,
     pos: Option<(i32, i32)>, // pill top-left, physical px
@@ -181,7 +185,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, auto_hide: false, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, pos: None }
     }
 }
 
@@ -228,6 +232,8 @@ impl Settings {
                 "duck_roles" => s.duck_roles = duck::format_roles(&duck::parse_roles(v)),
                 "art_tint" => s.art_tint = v == "1",
                 "kbd_show" => s.kbd_show = v == "1",
+                "guide_done" => s.guide_done = v == "1",
+                "rec_dir" => s.rec_dir = v.trim().to_string(),
                 "auto_hide" => s.auto_hide = v == "1",
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
@@ -255,8 +261,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.auto_hide), shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -303,6 +309,7 @@ enum Moving {
     Mascot(R, R),      // Peter: his cell, the pill
     Badge(R),          // the auto-lower badge on the speaker button
     Ring(usize, f32, f32, f32), // a metric's ring: which, centre x, y, radius
+    Spotlight(R),      // a pulsing ring pointing something out (the setup guide)
 }
 
 struct Layout {
@@ -333,6 +340,21 @@ fn main() {
         let elevated = admin::is_elevated();
         // Elevated helper launched from the menu to turn admin mode off.
         // `ResourcePill.exe --quit` closes a running copy (also an elevated one), e.g. before updating the exe.
+        // `--where-helper`: unpack the recording helper if this is a one-file build, print where it is
+        if arg("--where-helper") {
+            println!("{}", recorder::helper().map_or("not found".into(), |p| p.display().to_string()));
+            return;
+        }
+        // `--make-bundle <out.exe>`: one exe with the recording helper packed inside (see bundle.rs)
+        if let Some(out) = std::env::args().skip_while(|a| a != "--make-bundle").nth(1) {
+            std::process::exit(match bundle::make(std::path::Path::new(&out)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            });
+        }
         if arg("--quit") {
             if let Ok(h) = FindWindowW(CLASS, None) {
                 let _ = PostMessageW(Some(h), WM_APP_QUIT, WPARAM(0), LPARAM(0));
@@ -603,6 +625,11 @@ struct App {
     tint_a: f32, // how strongly they show (0 none … 1 full), gliding towards `tint_a_to`
     tint_a_to: f32,
     kbd_state: Option<keyboard::Status>, // your external keyboard (None: never had one)
+    guide: Option<u8>, // the setup guide, open at this step
+    setup_queue: Vec<&'static str>, // models still to download for transcription
+    setup_total: usize, // how many this round (for "2 of 4")
+    setup_current: Option<&'static str>, // the one downloading now
+    record_when_ready: bool, // record was pressed while getting ready
 
     // dragging: cursor offset inside the pill as a fraction, so it survives orientation changes
     press: Option<(POINT, (f32, f32))>,
@@ -755,6 +782,11 @@ impl App {
                 tint_a: 0.0,
                 tint_a_to: 0.0,
                 kbd_state: None,
+                guide: None,
+                setup_queue: Vec::new(),
+                setup_total: 0,
+                setup_current: None,
+                record_when_ready: false,
                 press: None,
                 dragging: false,
                 vol_drag: false,
@@ -793,6 +825,18 @@ impl App {
             }));
             self.media = Some(media::spawn(self.hwnd, WM_APP_MEDIA));
             self.check_keyboard(false);
+            recorder::set_recordings_dir((!self.cfg.rec_dir.is_empty()).then(|| std::path::PathBuf::from(&self.cfg.rec_dir)));
+            // out of the box: fetch what recording needs right away, and show the guide once
+            for id in self.missing_for_recording() {
+                self.setup_queue.push(id);
+                self.setup_total += 1;
+            }
+            if !self.setup_queue.is_empty() {
+                self.setup_next();
+            }
+            if !self.cfg.guide_done {
+                self.open_guide(0);
+            }
             self.duck.on.store(self.cfg.duck, Ordering::Relaxed);
             self.duck.ai.store(self.cfg.duck_ai, Ordering::Relaxed);
             self.duck.set_roles(duck::parse_roles(&self.cfg.duck_roles));
@@ -965,7 +1009,9 @@ impl App {
         });
         let used = strip.map_or(0.0, |s| s.h + GAP); // the panel goes beyond the strip
         let anchor = if self.mixer.is_some() { Some(mixer_btn) } else if self.music_open { music } else { None }.or(cells.iter().find(|c| c.0 == self.panel_sel).or(cells.first()).map(|c| c.1)).unwrap_or_default();
-        let lh = if self.settings.is_some() {
+        let lh = if self.guide.is_some() {
+            setup::GUIDE_H
+        } else if self.settings.is_some() {
             self.settings_h()
         } else if let Some(m) = &self.mixer {
             m.height()
@@ -986,7 +1032,7 @@ impl App {
         // stretched across the whole pill): settings under the gear, a list under its metric, the
         // player and the mixer under their own buttons
         if !vertical && !self.cfg.card {
-            let (w, under) = if self.settings.is_some() {
+            let (w, under) = if self.settings.is_some() || self.guide.is_some() {
                 (WIDE_PANEL_W, Some(gear))
             } else if self.mixer.is_some() {
                 (PANEL_W, Some(mixer_btn))
@@ -997,12 +1043,12 @@ impl App {
             };
             if let Some(u) = under {
                 panel.w = w;
-                panel.x = if self.settings.is_some() { u.x - 10.0 } else { u.x + u.w / 2.0 - w / 2.0 };
+                panel.x = if self.settings.is_some() || self.guide.is_some() { u.x - 10.0 } else { u.x + u.w / 2.0 - w / 2.0 };
             }
         }
         // the card is tall: settings below it would run off the screen, so they open beside it,
         // on whichever side has room, lined up with the card's top
-        if self.cfg.card && self.settings.is_some() {
+        if self.cfg.card && (self.settings.is_some() || self.guide.is_some()) {
             let room_right = wr - EDGE - (pw + GAP);
             let room_left = -GAP - (wl + EDGE);
             if room_right >= panel.w || room_left >= panel.w {
@@ -1034,8 +1080,8 @@ impl App {
         parts.extend(strip);
         // the panel's space only while one shows (or is still closing): a bare pill keeps a small
         // window, so every frame has far fewer pixels to paint and hand to Windows
-        let panel_showing = self.open > 0.003 || self.sel != NONE || self.settings.is_some() || self.music_open || self.mixer.is_some();
-        if if self.cfg.card { self.settings.is_some() } else { panel_showing } {
+        let panel_showing = self.open > 0.003 || self.sel != NONE || self.settings.is_some() || self.guide.is_some() || self.music_open || self.mixer.is_some();
+        if if self.cfg.card { self.settings.is_some() || self.guide.is_some() } else { panel_showing } {
             parts.push(panel);
         }
         let l = parts.iter().map(|r| r.x).fold(0.0f32, f32::min);
@@ -1212,6 +1258,7 @@ impl App {
                             self.speak(&a);
                         }
                         self.after_rec_change();
+                        self.setup_job_done(); // a setup download finished: on to the next
                     }
                 }
                 WM_TIMER if wp.0 == TIMER_TIP => self.hide_tip(),
@@ -1366,6 +1413,11 @@ impl App {
                         } else {
                             let (x, y) = self.dip(lp);
                             let lay = self.layout();
+                            if self.guide.is_some() && lay.panel.contains(x, y) {
+                                self.guide_click(x, y, lay.panel);
+                                self.dragging = false;
+                                return Some(LRESULT(0));
+                            }
                             if self.settings.is_some() && lay.panel.contains(x, y) {
                                 self.settings_click(x, y, lay.panel);
                                 self.dragging = false;
@@ -1400,7 +1452,7 @@ impl App {
                     // not on the record button or transcript: those are plain buttons
                     let (x, y) = self.dip(lp);
                     let lay = self.layout();
-                    let on_panel = (self.settings.is_some() || self.music_open || self.mixer.is_some()) && lay.panel.contains(x, y);
+                    let on_panel = (self.settings.is_some() || self.guide.is_some() || self.music_open || self.mixer.is_some()) && lay.panel.contains(x, y);
                     if !on_panel && !lay.music.is_some_and(|m| m.contains(x, y)) && !lay.rec.contains(x, y) && !lay.mascot.contains(x, y) && !lay.gear.contains(x, y) && !lay.strip.is_some_and(|s| s.contains(x, y)) {
                         self.set_card(!self.cfg.card);
                     }
@@ -1454,6 +1506,11 @@ impl App {
     /// Record button / Ctrl+Alt+R: start, or stop (the helper then saves and summarises).
     fn toggle_record(&mut self) {
         use recorder::State;
+        // not ready yet (models still downloading or missing): record the moment it is
+        if matches!(self.rec.state, State::Idle | State::Done | State::Failed) && !self.recording_ready() {
+            self.record_when_ready();
+            return;
+        }
         match self.rec.state {
             State::Recording => {
                 self.rec.stop();
@@ -1499,7 +1556,8 @@ impl App {
         // "Reduced" animations: only work in progress animates (as before); music and the sparkle hold still
         let ambient = self.cfg.anim == 0 && (self.now.playing || (!self.tucked && (self.cloud_ai() || self.tint_a > 0.01)));
         let ducking = self.duck.ducking.load(Ordering::Relaxed); // the auto-lower badge breathes
-        let moving = self.working() || ambient || (ducking && !self.tucked && self.cfg.anim == 0);
+        let spotlight = self.guide == Some(setup::RECORDINGS_STEP); // the gear pulses while the guide points at it
+        let moving = self.working() || ambient || spotlight || (ducking && !self.tucked && self.cfg.anim == 0);
         unsafe {
             if moving && self.want_visible {
                 SetTimer(Some(self.hwnd), TIMER_PULSE, self.frame_ms(), None);
@@ -1841,7 +1899,7 @@ impl App {
                 moving = true;
             }
         };
-        let open = self.sel != NONE || self.settings.is_some() || self.music_open || self.mixer.is_some();
+        let open = self.sel != NONE || self.settings.is_some() || self.guide.is_some() || self.music_open || self.mixer.is_some();
         go(&mut self.open, if open { 1.0 } else { 0.0 }, 14.0, 0.003);
         go(&mut self.hl_a, if self.sel != NONE { 1.0 } else { 0.0 }, 14.0, 0.003);
         go(&mut self.nav_t, 1.0, 16.0, 0.003);
@@ -2034,10 +2092,10 @@ impl App {
                 self.surface(s, 16.0);
             }
             let metric_panel = self.panel_sel != NONE && self.cfg.shown[self.panel_sel];
-            if self.open > 0.003 && (self.settings.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
+            if self.open > 0.003 && (self.settings.is_some() || self.guide.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
                 self.surface(lay.panel, 18.0);
-                if self.settings.is_some() {
-                    self.rt.FillRoundedRectangle(&self.rrect(lay.panel, 18.0), self.color(self.theme().bg, 0.85));
+                if self.settings.is_some() || self.guide.is_some() {
+                    self.rt.FillRoundedRectangle(&self.rrect(lay.panel, 18.0), self.color(self.theme().bg, 0.94));
                 }
             }
         }
@@ -2063,6 +2121,7 @@ impl App {
                 Moving::Mascot(r, pill) => self.draw_mascot(r, pill),
                 Moving::Badge(r) => self.draw_mixer_button(r),
                 Moving::Ring(i, x, y, rad) => self.ring(i, x, y, rad),
+                Moving::Spotlight(r) => self.draw_spotlight(r),
             }
         }
         self.alpha = 1.0;
@@ -2148,7 +2207,7 @@ impl App {
                     }
                 }
                 let metric_panel = !self.cfg.card && self.panel_sel != NONE && self.cfg.shown[self.panel_sel];
-                if self.open > 0.003 && (self.settings.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
+                if self.open > 0.003 && (self.settings.is_some() || self.guide.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
                     self.draw_panel(lay);
                 }
             }
@@ -2256,6 +2315,15 @@ impl App {
                         self.rt.DrawGeometry(&g, self.color(th.accent[0], 1.0), 2.2, &self.round);
                     }
                 }
+                _ if self.setup_current.is_some() || !self.recording_ready() => {
+                    // getting ready: how far the downloads are, as a ring (a faint dot: press to record when ready)
+                    let f = self.setup_progress().unwrap_or(0.0);
+                    self.rt.DrawEllipse(&circle(8.0), self.color(th.fg, 0.15), 2.0, None);
+                    if let Some(g) = self.arc_from(cx, cy, 8.0, -std::f32::consts::FRAC_PI_2, f.max(0.02)) {
+                        self.rt.DrawGeometry(&g, self.color(th.accent[0], 1.0), 2.0, &self.round);
+                    }
+                    self.rt.FillEllipse(&circle(3.2), self.color(th.hot, if self.record_when_ready { 0.9 } else { 0.35 }));
+                }
                 _ => {
                     self.rt.DrawEllipse(&circle(8.0), self.color(th.fg, 0.45), 1.6, None);
                     self.rt.FillEllipse(&circle(4.0), self.color(th.hot, 0.9));
@@ -2345,7 +2413,22 @@ impl App {
     }
 
     /// Settings button: a small gear (opens the same menu as right-clicking).
+    /// A soft ring that pulses outwards around something the guide is pointing at.
+    fn draw_spotlight(&self, r: R) {
+        let th = self.theme();
+        let t = (unsafe { windows::Win32::System::SystemInformation::GetTickCount() } % 3_600_000) as f32 / 1000.0;
+        let p = (t * 1.4).fract();
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        unsafe {
+            self.rt.DrawEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 12.0 + 6.0 * p, radiusY: 12.0 + 6.0 * p }, self.color(th.accent[0], 0.9 * (1.0 - p)), 2.0, None);
+            self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 12.0, radiusY: 12.0 }, self.color(th.accent[0], 0.22));
+        }
+    }
+
     fn draw_gear(&self, r: R) {
+        if self.guide == Some(setup::RECORDINGS_STEP) && !self.record(Moving::Spotlight(r)) {
+            self.draw_spotlight(r); // "here's where Recordings is"
+        }
         let th = self.theme();
         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
         let hover = self.gear_hover;
@@ -2398,7 +2481,10 @@ impl App {
                     }
                 }
                 let mb = |b: u64| b as f64 / 1_048_576.0;
-                let detail = if job.state == JobState::Running && total > 0 { format!("{}  ·  {:.0} of {:.0} MB", job.text, mb(done), mb(total)) } else { job.text.clone() };
+                let mut detail = if job.state == JobState::Running && total > 0 { format!("{}  ·  {:.0} of {:.0} MB", job.text, mb(done), mb(total)) } else { job.text.clone() };
+                if self.record_when_ready && self.setup_current.is_some() {
+                    detail += "  ·  recording starts the moment it's ready"; // the press they made is remembered
+                }
                 self.text(&detail, &self.f.row, R { x, y: s.y + 46.0, w, h: 18.0 }, tc, 0.85);
             }
         }
@@ -2628,13 +2714,15 @@ impl App {
         unsafe {
             self.alpha = e;
             self.surface(r, 18.0);
-            if self.settings.is_some() && self.pass != 1 {
+            if (self.settings.is_some() || self.guide.is_some()) && self.pass != 1 {
                 // settings stay easy to read whatever the pill opacity: back the panel nearly solid
-                self.rt.FillRoundedRectangle(&self.rrect(r, 18.0), self.color(self.theme().bg, 0.85));
+                self.rt.FillRoundedRectangle(&self.rrect(r, 18.0), self.color(self.theme().bg, 0.94));
             }
             self.rt.PushAxisAlignedClip(&R { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 6.0 }.d2d(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             self.alpha = e * e;
-            if self.settings.is_some() {
+            if self.guide.is_some() {
+                self.draw_guide(full);
+            } else if self.settings.is_some() {
                 self.draw_settings(r, full);
             } else {
                 if self.mixer.is_some() { self.draw_mixer(x, y, w) } else if self.music_open { self.draw_music_panel(x, y, w) } else { self.draw_top(x, y, w, ps, TITLES[ps]) }
@@ -2974,6 +3062,14 @@ impl App {
             }
             1202 => self.cfg.final_pass = !self.cfg.final_pass,
             1203 => self.cfg.keep_audio = !self.cfg.keep_audio,
+            1206 => {
+                self.pick_recordings_folder();
+                return;
+            }
+            1205 => {
+                self.open_guide(1); // straight to the speech model
+                return;
+            }
             1200 => {
                 let dir = recorder::recordings_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -3231,7 +3327,7 @@ mod tests {
     #[test]
     fn settings_roundtrip_and_garbage() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, auto_hide: true, pos: Some((-100, 50)) };
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
@@ -3240,6 +3336,7 @@ mod tests {
         assert_eq!((l.clock, l.anim, l.asr, l.llm, l.chime, l.explain, l.final_pass, l.keep_audio), (false, 1, 1, 2, false, 1, false, true));
         assert_eq!((l.cues, l.tx_cloud, l.voice, l.fps, l.duck, l.duck_ai), (false, true, false, 1, false, false));
         assert_eq!((l.duck_roles.as_str(), l.art_tint, l.kbd_show), ("chrome=l", false, false));
+        assert_eq!(l.rec_dir, "D:/Meetings");
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
         let g = Settings::load();

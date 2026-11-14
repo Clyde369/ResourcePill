@@ -280,6 +280,49 @@ pub unsafe fn run(a: &mut App, dir: PathBuf) {
         a.job = Some(recorder::Job::note(recorder::JobKind::Explain, "Keyboard", "Keychron K8 · connected by Bluetooth"));
         shot(a, &dir, "13-keyboard-note");
         a.kbd_state = None;
+        // first launch on a new PC: nothing installed yet (an empty models folder), voice detection
+        // done, the speech model 42% through, the guide open at each step
+        let real_models = std::env::var_os("LOCALAPPDATA");
+        let fresh = std::env::temp_dir().join("rp-fresh-pc");
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::create_dir_all(fresh.join("ResourcePill").join("models").join("vad"));
+        let _ = std::fs::write(fresh.join("ResourcePill").join("models").join("vad").join("silero_vad.onnx"), b"");
+        std::env::set_var("LOCALAPPDATA", &fresh);
+        let first_launch = |a: &mut App| {
+            reset(a);
+            a.cfg.asr = 0;
+            a.cfg.llm = 0;
+            a.cfg.tx_cloud = false;
+            a.setup_current = Some("parakeet-v3");
+            a.setup_queue = vec!["voiceprint", "segmentation"];
+            a.setup_total = 4;
+            a.job = Some(recorder::Job::preview_download("Getting ready · 2 of 4 · Parakeet TDT 0.6B v3 · 465 MB", 195_000_000, 465_000_000));
+        };
+        // a generic folder in the shot, not this PC's user name
+        recorder::set_recordings_dir(Some(std::path::PathBuf::from(r"C:\Users\You\Documents\ResourcePill\Recordings")));
+        for step in 0..5u8 {
+            first_launch(a);
+            a.guide = Some(step);
+            open(a);
+            shot(a, &dir, &format!("14-first-launch-guide-{step}"));
+        }
+        recorder::set_recordings_dir((!a.cfg.rec_dir.is_empty()).then(|| std::path::PathBuf::from(&a.cfg.rec_dir)));
+        first_launch(a);
+        a.guide = None;
+        shot(a, &dir, "14-first-launch-downloading");
+        first_launch(a);
+        a.record_when_ready = true;
+        shot(a, &dir, "14-first-launch-record-pressed");
+        match real_models {
+            Some(v) => std::env::set_var("LOCALAPPDATA", v),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        reset(a);
+        a.setup_current = None;
+        a.setup_queue.clear();
+        a.job = Some(recorder::Job::note(recorder::JobKind::Download, "Ready", "Transcription is ready · press ● or Ctrl+Alt+R to record"));
+        shot(a, &dir, "14-first-launch-ready");
+        a.job = None;
         // no music playing (the cell goes away)
         reset(a);
         a.now = media::Now::default();

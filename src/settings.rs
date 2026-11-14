@@ -47,7 +47,7 @@ fn item_h(i: &MI) -> f32 {
 
 /// Commands that leave the panel (they open something or change what is on screen).
 fn closes_panel(id: usize) -> bool {
-    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1300 | 1499) || (600..700).contains(&id) || (1400..1499).contains(&id)
+    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1205 | 1300 | 1499) || (600..700).contains(&id) || (1400..1499).contains(&id)
 }
 
 impl App {
@@ -100,7 +100,7 @@ impl App {
             act(1210, "On this PC (private, free)", !cfg.tx_cloud),
             act_r(1211, "Gemini (cloud · transcript + summary)", need(gem), cfg.tx_cloud),
         ];
-        let mut tx = vec![MI::Head("Speech to text · predicted for this PC now".into())];
+        let mut tx = vec![act_r(1205, "Setup guide", "change models", false), MI::Sep, MI::Head("Speech to text · predicted for this PC now".into())];
         for (i, (id, name)) in recorder::ASR.iter().enumerate() {
             tx.push(act_r(1000 + i, name, &recorder::asr_prediction(id, cpu), cfg.asr == i));
         }
@@ -114,6 +114,7 @@ impl App {
         tx.push(act_r(1202, "Accurate pass after stopping", &recorder::final_prediction(cpu), cfg.final_pass));
         tx.push(act(1203, "Save the audio (listen back in Recordings)", cfg.keep_audio));
         tx.push(act(1200, "Open recordings folder", false));
+        tx.push(act_r(1206, "Recordings folder…", &recorder::recordings_dir().display().to_string(), false));
         tx.push(MI::Sep);
         tx.extend(tx_ai());
         let asr_short = recorder::ASR.get(cfg.asr).map_or("", |a| a.1.split(" (").next().unwrap_or(a.1));

@@ -46,8 +46,20 @@ pub fn models_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("ResourcePill").join("models")
 }
 
-/// Documents\ResourcePill\Recordings (follows OneDrive/folder redirection).
+static REC_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Use this folder for recordings (your choice in the setup guide); None: the default.
+pub fn set_recordings_dir(dir: Option<PathBuf>) {
+    *REC_DIR.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// Where recordings, transcripts and summaries go: your chosen folder, else the default.
 pub fn recordings_dir() -> PathBuf {
+    REC_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(default_recordings_dir)
+}
+
+/// Documents\ResourcePill\Recordings (follows OneDrive/folder redirection).
+pub fn default_recordings_dir() -> PathBuf {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
     let docs = unsafe {
@@ -61,7 +73,8 @@ pub fn recordings_dir() -> PathBuf {
 }
 
 pub fn helper() -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.with_file_name("ResourcePill-Scribe.exe");
+    // next to the exe, or unpacked from a one-file build
+    let p = crate::bundle::helper_dir()?.join("ResourcePill-Scribe.exe");
     p.exists().then_some(p)
 }
 
@@ -269,6 +282,11 @@ impl Job {
         });
         let text = if kind == JobKind::Explain { "Thinking…".into() } else { "Starting download…".into() };
         Ok(Job { child: Some(child), inbox, kind, state: JobState::Running, title, query, text, progress: (0, 0), at: Instant::now(), note: false })
+    }
+
+    /// A download that looks part-way through (for the `--snapshots` pictures of first launch).
+    pub fn preview_download(title: &str, done: u64, total: u64) -> Job {
+        Job { child: None, inbox: Arc::new(Mutex::new(Vec::new())), kind: JobKind::Download, state: JobState::Running, title: title.into(), query: String::new(), text: "Downloading…".into(), progress: (done, total), at: Instant::now(), note: false }
     }
 
     /// A finished job that only shows a message (e.g. "highlight some text first").
