@@ -65,6 +65,10 @@ fn unpack_list(bytes: &[u8]) -> Option<Vec<(String, &[u8])>> {
         let nlen = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
         at += 4;
         let name = std::str::from_utf8(bytes.get(at..at + nlen)?).ok()?.to_string();
+        // plain file names only: nothing may land outside the unpack folder
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
+            return None;
+        }
         at += nlen;
         let dlen = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize;
         at += 8;
@@ -99,7 +103,14 @@ pub fn helper_dir() -> Option<PathBuf> {
         }
         // a version key from the exe's size and date: a new build unpacks into a new folder
         let stamp = std::fs::metadata(&me).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("ResourcePill").join("bin").join(format!("{len}-{stamp}"));
+        let version = format!("{len}-{stamp}");
+        // Elevated (admin mode), the helper must not run from a folder this user can write to, or
+        // anything running as them could swap it and get admin rights: use an admin-only folder.
+        let dir = if crate::admin::is_elevated() {
+            admin_only_dir(&version)?
+        } else {
+            PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("ResourcePill").join("bin").join(&version)
+        };
         if !dir.join(".complete").exists() {
             let bytes = std::fs::read(&me).ok()?;
             std::fs::create_dir_all(&dir).ok()?;
@@ -114,8 +125,67 @@ pub fn helper_dir() -> Option<PathBuf> {
     .clone()
 }
 
+/// `C:\ProgramData\ResourcePill-bin-<version>`, created here so only Administrators and SYSTEM can
+/// change it (users may read and run). If it already exists it is used only when it's a real
+/// folder (not a link) owned by Administrators or SYSTEM, which a normal user can't fake;
+/// otherwise None (no helper) rather than running something planted.
+fn admin_only_dir(version: &str) -> Option<PathBuf> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::*;
+    use windows::Win32::Security::*;
+    use windows::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    use windows::core::{HSTRING, w};
+    use std::os::windows::fs::MetadataExt;
+
+    // from the registry, not %ProgramData% (a user can set their own environment variables)
+    let root = unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_ProgramData, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let s = p.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+        PathBuf::from(s?)
+    };
+    let dir = root.join(format!("ResourcePill-bin-{version}"));
+    let wide = HSTRING::from(dir.as_os_str());
+    unsafe {
+        // owner Administrators; protected DACL: SYSTEM + Administrators full, Users read/run
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"), SDDL_REVISION_1, &mut sd, None).ok()?;
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
+        let created = CreateDirectoryW(&wide, Some(&sa)).is_ok();
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        if created {
+            return Some(dir);
+        }
+        // already there: trust it only if it's a plain folder owned by an admin account
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return None;
+        }
+        let mut owner = PSID::default();
+        let mut desc = PSECURITY_DESCRIPTOR::default();
+        if GetNamedSecurityInfoW(&wide, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, &mut desc).is_err() {
+            return None;
+        }
+        let trusted = IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() || IsWellKnownSid(owner, WinLocalSystemSid).as_bool();
+        let _ = LocalFree(Some(HLOCAL(desc.0)));
+        trusted.then_some(dir)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// Run without admin rights: a folder this user made in ProgramData is not trusted.
+    #[test]
+    #[ignore]
+    fn live_planted_folder_refused() {
+        let dir = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap()).join("ResourcePill-bin-test-planted");
+        std::fs::create_dir_all(&dir).unwrap();
+        let got = super::admin_only_dir("test-planted");
+        let _ = std::fs::remove_dir(&dir);
+        assert!(got.is_none());
+    }
+
     #[test]
     fn packs_and_unpacks() {
         // a fake exe with two files on the end, built the same way `make` does
@@ -134,5 +204,15 @@ mod tests {
         assert_eq!((files[1].0.as_str(), files[1].1), ("onnxruntime.dll", &b"dll bytes"[..]));
         assert_eq!(super::exe_part(&data), b"MZ pretend exe", "re-bundling starts from the bare exe");
         assert!(super::unpack_list(b"MZ no bundle here").is_none());
+        // a name that would escape the folder is refused
+        let mut bad = b"MZ".to_vec();
+        let name = b"..\\evil.dll";
+        bad.extend((name.len() as u32).to_le_bytes());
+        bad.extend(name);
+        bad.extend(1u64.to_le_bytes());
+        bad.push(0);
+        bad.extend(2u64.to_le_bytes());
+        bad.extend(super::MAGIC);
+        assert!(super::unpack_list(&bad).is_none());
     }
 }
