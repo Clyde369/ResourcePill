@@ -11,6 +11,10 @@ mod edge;
 mod explainui;
 mod media;
 mod music;
+mod mixer;
+mod duck;
+mod snapshot;
+mod keyboard;
 #[allow(dead_code)] // download fields are used by the helper
 mod catalog;
 
@@ -58,8 +62,12 @@ const TIP_W: f32 = 176.0; // explain tooltip by the highlight
 const TIP_H: f32 = 32.0;
 const MUSIC_W: f32 = 216.0; // now-playing cell at the end of the pill
 const MUSIC_V: f32 = 48.0;
+const MIXER_W: f32 = 32.0; // volume mixer button
+const MIXER_V: f32 = 32.0;
 const MUSIC_PANEL_H: f32 = 196.0;
 const PANEL_W: f32 = 330.0;
+const WIDE_PANEL_W: f32 = 390.0; // settings and top-apps lists (they carry longer text)
+const TOP_MIN_PANEL: f32 = 120.0; // a panel squeezed by the screen edge never gets shorter than this
 const ROW_H: f32 = 28.0; // top-list row height; panels grow with their rows (min 3)
 const CARD_W: f32 = 380.0;
 const CARD_HEAD: f32 = 46.0;
@@ -80,16 +88,21 @@ const WM_APP_SCRIBE: u32 = WM_APP + 6; // output from the transcriber helper
 const WM_APP_JOB: u32 = WM_APP + 7; // output from an explain/download job
 const WM_APP_MENU: u32 = WM_APP + 8; // open the settings menu (from the gear button)
 const WM_APP_MEDIA: u32 = WM_APP + 12; // now-playing changed (song, state, cover)
+const WM_APP_DUCK: u32 = WM_APP + 13; // auto-lower started or ended (the badge)
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM: usize = 1;
 const TIMER_PULSE: usize = 2; // ~20 fps while something is working (pulse, mascot)
 const TIMER_BLINK: usize = 3; // the mascot blinks every few seconds
 const TIMER_TIP: usize = 4; // hides the explain tooltip after a while
 const TIMER_EDGE: usize = 5; // edge auto-hide: watches the mouse (cheap, ~12 checks a second)
+const TIMER_KBD: usize = 6; // a moment after a device change: check the keyboard
+const KBD_W: f32 = 32.0; // keyboard connection cell
+const KBD_V: f32 = 32.0;
 const EDGE_LINE: i32 = 3; // px of the glowing line left on screen when tucked
 const HOTKEY: i32 = 1;
 const HOTKEY_REC: i32 = 2; // Ctrl+Alt+R
 const HOTKEY_EXPLAIN: i32 = 3; // Ctrl+Alt+E
+const HOTKEY_MIXER: i32 = 4; // Ctrl+Alt+V
 const CLASS: PCWSTR = w!("ResourcePill.Window");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: PCWSTR = w!("ResourcePill");
@@ -156,6 +169,11 @@ struct Settings {
     tx_cloud: bool, // transcribe + summarise with Gemini after stopping (needs a Google key)
     voice: bool, // read explanations aloud (Windows voice)
     fps: usize, // index into FPS
+    duck: bool, // lower music while someone talks in a voice app
+    duck_ai: bool, // …deciding "someone is talking" with the AI voice detector
+    duck_roles: String, // your auto-lower roles per app, e.g. "chrome=l;spotify=i" (the rest: automatic)
+    art_tint: bool, // tint the pill with the song cover's colours
+    kbd_show: bool, // show how the keyboard is connected (Bluetooth, cable, disconnected)
     auto_hide: bool, // tuck into the screen edge when the mouse is away
     keep_audio: bool,
     pos: Option<(i32, i32)>, // pill top-left, physical px
@@ -163,7 +181,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, auto_hide: false, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, auto_hide: false, pos: None }
     }
 }
 
@@ -205,6 +223,11 @@ impl Settings {
                 "tx_cloud" => s.tx_cloud = v == "1",
                 "voice" => s.voice = v == "1",
                 "fps" => s.fps = idx(FPS.len()).unwrap_or(3),
+                "duck" => s.duck = v == "1",
+                "duck_ai" => s.duck_ai = v == "1",
+                "duck_roles" => s.duck_roles = duck::format_roles(&duck::parse_roles(v)),
+                "art_tint" => s.art_tint = v == "1",
+                "kbd_show" => s.kbd_show = v == "1",
                 "auto_hide" => s.auto_hide = v == "1",
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
@@ -232,8 +255,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.auto_hide), shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.auto_hide), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -272,6 +295,16 @@ enum Dir {
 }
 
 /// Everything positioned in window DIPs.
+/// Something that moves every frame, recorded by the still pass and drawn by the moving pass.
+#[derive(Clone, Copy)]
+enum Moving {
+    Eq(f32, f32, f32), // music bars: x, baseline, height
+    Progress(R),       // song progress
+    Mascot(R, R),      // Peter: his cell, the pill
+    Badge(R),          // the auto-lower badge on the speaker button
+    Ring(usize, f32, f32, f32), // a metric's ring: which, centre x, y, radius
+}
+
 struct Layout {
     clock: Option<R>, // clock cell (pill) or clock area (card header)
     rec: R,           // record button
@@ -279,6 +312,8 @@ struct Layout {
     gear: R,          // settings button (same menu as right-click)
     strip: Option<R>, // live transcript strip (while recording / until dismissed)
     music: Option<R>, // now-playing cell (only while something plays or is paused)
+    mixer: R, // volume mixer button
+    kbd: Option<R>, // keyboard connection (when an external keyboard is known)
     vertical: bool,
     pill: R,
     cells: Vec<(usize, R)>,
@@ -306,6 +341,19 @@ fn main() {
         }
         if arg("--disable-admin") {
             std::process::exit(if elevated && admin::remove_task() { 0 } else { 1 });
+        }
+        // `--snapshots <folder>`: draw every view to PNGs and exit (nothing on screen, settings untouched)
+        if let Some(dir) = std::env::args().skip_while(|a| a != "--snapshots").nth(1) {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let Ok(hinst) = GetModuleHandleW(None) else { return };
+            let class = w!("ResourcePill.Snapshot");
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: class, ..Default::default() });
+            let Ok(hwnd) = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, class, w!(""), WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None) else { return };
+            if let Some(mut app) = App::new(hwnd, Settings::load()) {
+                snapshot::run(&mut app, dir.into());
+            }
+            return;
         }
         // One instance only; a second launch just shows the running one. A copy started by the
         // admin task (or the enable flow) waits briefly for the previous copy to finish exiting.
@@ -529,6 +577,11 @@ struct App {
     now: media::Now, // copy for drawing
     art: Option<ID2D1Bitmap>, // decoded cover of `now`
     music_open: bool,
+    mixer: Option<mixer::Mixer>, // open volume mixer
+    mix_drag: Option<usize>, // mixer row whose slider is held
+    duck: Arc<duck::Shared>, // auto-lower: switches and state shared with its thread
+    duck_thread: Option<std::thread::JoinHandle<()>>,
+    icons: std::collections::HashMap<String, ID2D1Bitmap>, // app icons by program path (the auto-lower badge)
     voice: Option<windows::Win32::Media::Speech::ISpVoice>,
     blink_at: Option<Instant>,
     vram_total: f64,
@@ -537,6 +590,19 @@ struct App {
     last_frame: Instant,
     anim_on: bool,
     alpha: f32, // multiplier applied by `color`
+    pass: u8, // 0 draw everything; 1 the still layer (moving pieces only recorded); 2 the moving pieces
+    rings_only: bool, // the current animation is just the rings gliding to new readings
+    beat: std::cell::Cell<f32>, // how loud the PC's sound is right now, smoothed (the aurora breathes with it)
+    beat_meter: RefCell<Option<windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation>>,
+    moving: RefCell<Vec<(Moving, f32)>>, // moving pieces recorded by the still pass (with their alpha)
+    content: Option<(ID2D1Bitmap, i32, i32)>, // cached content layer (text, rings, art…), ready to draw
+    back: Option<(HDC, HBITMAP, HGDIOBJ, i32, i32)>, // cached background layer: the surfaces under the content
+    auroras: RefCell<Vec<(R, f32)>>, // surfaces that get the drifting aurora (between background and content)
+    tint: [f32; 6], // song-cover colours now (two RGB colours), gliding towards `tint_to`
+    tint_to: [f32; 6],
+    tint_a: f32, // how strongly they show (0 none … 1 full), gliding towards `tint_a_to`
+    tint_a_to: f32,
+    kbd_state: Option<keyboard::Status>, // your external keyboard (None: never had one)
 
     // dragging: cursor offset inside the pill as a fraction, so it survives orientation changes
     press: Option<(POINT, (f32, f32))>,
@@ -663,6 +729,11 @@ impl App {
                 now: media::Now::default(),
                 art: None,
                 music_open: false,
+                mixer: None,
+                mix_drag: None,
+                duck: Arc::new(duck::Shared::new()), // switches set from the settings in start()
+                duck_thread: None,
+                icons: Default::default(),
                 voice: None,
                 blink_at: None,
                 vram_total: 0.0,
@@ -671,6 +742,19 @@ impl App {
                 last_frame: Instant::now(),
                 anim_on: false,
                 alpha: 1.0,
+                pass: 0,
+                rings_only: false,
+                beat: std::cell::Cell::new(0.0),
+                beat_meter: RefCell::new(None),
+                moving: RefCell::new(Vec::new()),
+                content: None,
+                back: None,
+                auroras: RefCell::new(Vec::new()),
+                tint: [0.0; 6],
+                tint_to: [0.0; 6],
+                tint_a: 0.0,
+                tint_a_to: 0.0,
+                kbd_state: None,
                 press: None,
                 dragging: false,
                 vol_drag: false,
@@ -695,6 +779,7 @@ impl App {
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'M' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_REC, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_EXPLAIN, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'E' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_MIXER, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'V' as u32);
             SetTimer(Some(self.hwnd), TIMER_BLINK, 3000, None);
             self.sync_edge_timer();
             self.vram_total = recorder::vram_total();
@@ -707,6 +792,12 @@ impl App {
                 let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_DATA, WPARAM(0), LPARAM(0));
             }));
             self.media = Some(media::spawn(self.hwnd, WM_APP_MEDIA));
+            self.check_keyboard(false);
+            self.duck.on.store(self.cfg.duck, Ordering::Relaxed);
+            self.duck.ai.store(self.cfg.duck_ai, Ordering::Relaxed);
+            self.duck.set_roles(duck::parse_roles(&self.cfg.duck_roles));
+            self.duck.notify.store(self.hwnd.0 as isize, Ordering::Relaxed);
+            self.duck_thread = duck::spawn(self.duck.clone());
             if self.cfg.card {
                 self.select(self.shown()[0]);
             }
@@ -788,9 +879,9 @@ impl App {
         if self.cfg.card {
             (CARD_W, CARD_HEAD + s.len() as f32 * CARD_ROW + self.list_h())
         } else if vertical {
-            (V_PILL, s.len() as f32 * V_SEG + PAD * 2.0 + GEAR_V + REC_V + MASCOT_V + if self.cfg.clock { CLOCK_V } else { 0.0 } + if self.now.present { MUSIC_V } else { 0.0 })
+            (V_PILL, s.len() as f32 * V_SEG + PAD * 2.0 + GEAR_V + REC_V + MASCOT_V + if self.cfg.clock { CLOCK_V } else { 0.0 } + MIXER_V + if self.show_kbd() { KBD_V } else { 0.0 } + if self.now.present { MUSIC_V } else { 0.0 })
         } else {
-            (s.iter().map(|&i| H_SEG[i]).sum::<f32>() + PAD * 2.0 + GEAR_W + REC_W + MASCOT_W + if self.cfg.clock { CLOCK_W } else { 0.0 } + if self.now.present { MUSIC_W } else { 0.0 }, H_PILL)
+            (s.iter().map(|&i| H_SEG[i]).sum::<f32>() + PAD * 2.0 + GEAR_W + REC_W + MASCOT_W + if self.cfg.clock { CLOCK_W } else { 0.0 } + MIXER_W + if self.show_kbd() { KBD_W } else { 0.0 } + if self.now.present { MUSIC_W } else { 0.0 }, H_PILL)
         }
     }
 
@@ -807,6 +898,8 @@ impl App {
         let mascot;
         let gear;
         let mut music = None;
+        let mixer_btn;
+        let mut kbd = None;
         if self.cfg.card {
             for (n, i) in self.shown().into_iter().enumerate() {
                 cells.push((i, R { x: 8.0, y: CARD_HEAD + n as f32 * CARD_ROW, w: pw - 16.0, h: CARD_ROW }));
@@ -815,6 +908,7 @@ impl App {
             rec = R { x: pw - 48.0, y: 8.0, w: 34.0, h: 32.0 };
             mascot = R { x: pw - 86.0, y: 8.0, w: 36.0, h: 32.0 };
             gear = R { x: pw - 122.0, y: 8.0, w: 34.0, h: 32.0 };
+            mixer_btn = R { x: pw - 156.0, y: 8.0, w: 34.0, h: 32.0 };
         } else {
             let mut off = PAD;
             gear = if vertical { R { x: 0.0, y: off, w: pw, h: GEAR_V } } else { R { x: off, y: 0.0, w: GEAR_W, h: ph } };
@@ -835,6 +929,12 @@ impl App {
                     cells.push((i, R { x: off, y: 0.0, w: H_SEG[i], h: ph }));
                     off += H_SEG[i];
                 }
+            }
+            mixer_btn = if vertical { R { x: 0.0, y: off, w: pw, h: MIXER_V } } else { R { x: off, y: 0.0, w: MIXER_W, h: ph } };
+            off += if vertical { MIXER_V } else { MIXER_W };
+            if self.show_kbd() {
+                kbd = Some(if vertical { R { x: 0.0, y: off, w: pw, h: KBD_V } } else { R { x: off, y: 0.0, w: KBD_W, h: ph } });
+                off += if vertical { KBD_V } else { KBD_W };
             }
             if self.now.present {
                 music = Some(if vertical { R { x: 0.0, y: off, w: pw, h: MUSIC_V } } else { R { x: off, y: 0.0, w: MUSIC_W, h: ph } });
@@ -864,9 +964,11 @@ impl App {
             R { x: clamp_x(x, side_w), y, w: side_w, h: self.strip_h(side_w) }
         });
         let used = strip.map_or(0.0, |s| s.h + GAP); // the panel goes beyond the strip
-        let anchor = if self.music_open { music } else { None }.or(cells.iter().find(|c| c.0 == self.panel_sel).or(cells.first()).map(|c| c.1)).unwrap_or_default();
+        let anchor = if self.mixer.is_some() { Some(mixer_btn) } else if self.music_open { music } else { None }.or(cells.iter().find(|c| c.0 == self.panel_sel).or(cells.first()).map(|c| c.1)).unwrap_or_default();
         let lh = if self.settings.is_some() {
             self.settings_h()
+        } else if let Some(m) = &self.mixer {
+            m.height()
         } else if self.music_open {
             MUSIC_PANEL_H
         } else {
@@ -880,18 +982,60 @@ impl App {
                 R { x, y: (anchor.y + anchor.h / 2.0 - lh / 2.0).max(used), w: side_w, h: lh }
             }
         };
-        if let (true, false, Some(m)) = (self.music_open && self.settings.is_none(), vertical, music) {
-            panel.w = PANEL_W; // the player sits under its own cell, not the whole pill's width
-            panel.x = m.x + m.w / 2.0 - PANEL_W / 2.0;
+        // horizontal pill: a panel opens under whatever opened it, at a comfortable width (not
+        // stretched across the whole pill): settings under the gear, a list under its metric, the
+        // player and the mixer under their own buttons
+        if !vertical && !self.cfg.card {
+            let (w, under) = if self.settings.is_some() {
+                (WIDE_PANEL_W, Some(gear))
+            } else if self.mixer.is_some() {
+                (PANEL_W, Some(mixer_btn))
+            } else if self.music_open {
+                (PANEL_W, music)
+            } else {
+                (WIDE_PANEL_W, cells.iter().find(|c| c.0 == self.panel_sel).map(|c| c.1))
+            };
+            if let Some(u) = under {
+                panel.w = w;
+                panel.x = if self.settings.is_some() { u.x - 10.0 } else { u.x + u.w / 2.0 - w / 2.0 };
+            }
+        }
+        // the card is tall: settings below it would run off the screen, so they open beside it,
+        // on whichever side has room, lined up with the card's top
+        if self.cfg.card && self.settings.is_some() {
+            let room_right = wr - EDGE - (pw + GAP);
+            let room_left = -GAP - (wl + EDGE);
+            if room_right >= panel.w || room_left >= panel.w {
+                panel.x = if room_right >= panel.w { pw + GAP } else { -GAP - panel.w };
+                panel.y = 0.0;
+            }
         }
         panel.x = clamp_x(panel.x, panel.w);
+        // never past the top or bottom of the screen: a panel that doesn't fit gets shorter (the
+        // settings scroll, with a fade showing there's more)
+        let (lo, hi) = (wt + EDGE, wb - EDGE);
+        let beside = panel.x >= pw || panel.x + panel.w <= 0.0;
+        if panel.y < lo {
+            panel.h -= lo - panel.y;
+            panel.y = lo;
+        }
+        if panel.y + panel.h > hi {
+            if beside {
+                panel.y = (hi - panel.h).max(lo); // slide up first, then shorten if still too tall
+            }
+            panel.h = hi - panel.y;
+        }
+        panel.h = panel.h.max(TOP_MIN_PANEL);
         if vertical {
             panel.y = panel.y.clamp((wt + EDGE).max(used), (wb - EDGE - panel.h).max(wt + EDGE));
         }
         // window = union(pill, strip, panel if it can show) + margin; shift everything into window space
         let mut parts = vec![R { x: 0.0, y: 0.0, w: pw, h: ph }];
         parts.extend(strip);
-        if !self.cfg.card || self.settings.is_some() {
+        // the panel's space only while one shows (or is still closing): a bare pill keeps a small
+        // window, so every frame has far fewer pixels to paint and hand to Windows
+        let panel_showing = self.open > 0.003 || self.sel != NONE || self.settings.is_some() || self.music_open || self.mixer.is_some();
+        if if self.cfg.card { self.settings.is_some() } else { panel_showing } {
             parts.push(panel);
         }
         let l = parts.iter().map(|r| r.x).fold(0.0f32, f32::min);
@@ -907,6 +1051,8 @@ impl App {
             gear: mv(gear),
             strip: strip.map(mv),
             music: music.map(mv),
+            mixer: mv(mixer_btn),
+            kbd: kbd.map(mv),
             vertical,
             pill: R { x: ox, y: oy, w: pw, h: ph },
             cells: cells.into_iter().map(|(i, r)| (i, mv(r))).collect(),
@@ -968,8 +1114,9 @@ impl App {
             match msg {
                 WM_APP_DATA => {
                     self.snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    self.refresh_mixer(); // apps come and go
                     // short notes ("highlight some text first", "key saved") clear themselves after 8 s
-                    if self.job.as_ref().is_some_and(|j| j.kind == recorder::JobKind::Explain && j.state == recorder::JobState::Failed && j.at.elapsed().as_secs() >= 8) {
+                    if self.job.as_ref().is_some_and(|j| j.note && j.at.elapsed().as_secs() >= 8) {
                         self.job = None;
                         self.after_rec_change();
                     }
@@ -998,10 +1145,11 @@ impl App {
                             }
                             h.push_back(v);
                         }
+                        // new numbers: one full frame (refreshes the cached still picture), then the
+                        // rings glide to them on cheap moving-only frames
+                        self.render();
                         if full || self.sheen >= 0.0 {
                             self.kick();
-                        } else if !self.anim_on {
-                            self.render();
                         }
                     }
                     let s = &self.snap;
@@ -1011,7 +1159,11 @@ impl App {
                 WM_TIMER if wp.0 == TIMER_ANIM => {
                     let moving = self.step();
                     if self.fade > 0.0 {
-                        self.render();
+                        if self.rings_only {
+                            self.render_moving(); // just the rings gliding: the rest stays cached
+                        } else {
+                            self.render();
+                        }
                     }
                     if !moving {
                         let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
@@ -1024,14 +1176,28 @@ impl App {
                 WM_HOTKEY if wp.0 as i32 == HOTKEY => self.toggle_tuck(), // tuck to the edge / bring back
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_REC => self.toggle_record(),
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_EXPLAIN => self.explain_now(), // highlight, then press
-                WM_MOUSEWHEEL if self.settings.is_none() && self.now.present => {
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_MIXER => self.toggle_mixer(),
+                WM_MOUSEWHEEL if self.settings.is_none() => {
+                    let notches = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
                     // over the music cell or the player: volume
                     let mut c = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
                     let _ = ScreenToClient(self.hwnd, &mut c);
                     let (x, y) = (c.x as f32 / self.scale, c.y as f32 / self.scale);
                     let lay = self.layout();
-                    if lay.music.is_some_and(|m| m.contains(x, y)) || (self.music_open && lay.panel.contains(x, y)) {
-                        self.volume_step(((wp.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0);
+                    if self.mixer.is_some() && lay.panel.contains(x, y) {
+                        self.mixer_wheel(x, y, lay.panel, notches); // the row under the mouse
+                    } else if lay.mixer.contains(x, y) {
+                        // the speaker button: the PC's volume, mixer open or not
+                        if let Some(m) = media::volume::master() {
+                            let v = (m.GetMasterVolumeLevelScalar().unwrap_or(0.0) + notches * 0.05).clamp(0.0, 1.0);
+                            let _ = m.SetMasterVolumeLevelScalar(v, std::ptr::null());
+                            if let Some(mx) = self.mixer.as_mut() {
+                                mx.rows[0].vol = v;
+                            }
+                            self.render();
+                        }
+                    } else if lay.music.is_some_and(|m| m.contains(x, y)) || (self.music_open && lay.panel.contains(x, y)) {
+                        self.volume_step(notches);
                     }
                 }
                 WM_MOUSEWHEEL if self.settings.is_some() => {
@@ -1059,6 +1225,15 @@ impl App {
                 }
                 explainui::WM_APP_POPCLICK => self.tip_click(explainui::unpack(lp).0),
                 WM_TIMER if wp.0 == TIMER_EDGE => self.edge_tick(),
+                // a device came or went (plug, unplug, Bluetooth): check the keyboard once things settle
+                WM_DEVICECHANGE => {
+                    SetTimer(Some(self.hwnd), TIMER_KBD, 700, None);
+                    return None;
+                }
+                WM_TIMER if wp.0 == TIMER_KBD => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_KBD);
+                    self.check_keyboard(true);
+                }
                 WM_TIMER if wp.0 == TIMER_BLINK => {
                     // blink, then schedule the next one 2.5-7 s later
                     self.blink_at = Some(Instant::now());
@@ -1067,6 +1242,7 @@ impl App {
                     self.kick();
                 }
                 WM_APP_MEDIA => self.media_changed(),
+                WM_APP_DUCK => self.duck_changed(),
                 WM_APP_SCRIBE => {
                     let was_done = matches!(self.rec.state, recorder::State::Done);
                     if self.rec.pump() {
@@ -1078,7 +1254,7 @@ impl App {
                 }
                 WM_TIMER if wp.0 == TIMER_PULSE => {
                     if self.fade > 0.0 && !self.anim_on {
-                        self.render();
+                        self.render_moving(); // only the small areas that move
                     }
                 }
                 WM_APP_SHOW => self.set_visible(true),
@@ -1096,6 +1272,26 @@ impl App {
                     return if msg == WM_SETTINGCHANGE { None } else { Some(LRESULT(0)) };
                 }
                 WM_LBUTTONDOWN if self.tucked => self.toggle_tuck(), // tap the edge line: back
+                WM_LBUTTONDOWN if self.mixer.is_some() && { let (x, y) = self.dip(lp); self.mixer_slider_at(x, y, self.layout().panel).is_some() } => {
+                    let (x, y) = self.dip(lp);
+                    let panel = self.layout().panel;
+                    self.mix_drag = self.mixer_slider_at(x, y, panel);
+                    SetCapture(self.hwnd);
+                    if let Some(i) = self.mix_drag {
+                        self.mixer_drag(i, x, panel);
+                    }
+                }
+                WM_MOUSEMOVE if self.mix_drag.is_some() => {
+                    let (x, _) = self.dip(lp);
+                    let panel = self.layout().panel;
+                    if let Some(i) = self.mix_drag {
+                        self.mixer_drag(i, x, panel);
+                    }
+                }
+                WM_LBUTTONUP if self.mix_drag.is_some() => {
+                    self.mix_drag = None;
+                    let _ = ReleaseCapture();
+                }
                 WM_LBUTTONDOWN if self.music_open && { let (x, y) = self.dip(lp); self.volume_hit(x, y, self.layout().panel) } => {
                     self.vol_drag = true;
                     SetCapture(self.hwnd);
@@ -1174,6 +1370,10 @@ impl App {
                                 self.settings_click(x, y, lay.panel);
                                 self.dragging = false;
                                 return Some(LRESULT(0));
+                            } else if self.mixer.is_some() && lay.panel.contains(x, y) {
+                                self.mixer_click(x, y, lay.panel);
+                            } else if lay.mixer.contains(x, y) {
+                                self.toggle_mixer();
                             } else if self.music_open && lay.panel.contains(x, y) {
                                 self.music_panel_click(x, y, lay.panel);
                             } else if let Some(m) = lay.music.filter(|m| m.contains(x, y)) {
@@ -1200,7 +1400,7 @@ impl App {
                     // not on the record button or transcript: those are plain buttons
                     let (x, y) = self.dip(lp);
                     let lay = self.layout();
-                    let on_panel = (self.settings.is_some() || self.music_open) && lay.panel.contains(x, y);
+                    let on_panel = (self.settings.is_some() || self.music_open || self.mixer.is_some()) && lay.panel.contains(x, y);
                     if !on_panel && !lay.music.is_some_and(|m| m.contains(x, y)) && !lay.rec.contains(x, y) && !lay.mascot.contains(x, y) && !lay.gear.contains(x, y) && !lay.strip.is_some_and(|s| s.contains(x, y)) {
                         self.set_card(!self.cfg.card);
                     }
@@ -1297,8 +1497,9 @@ impl App {
     /// Nothing moving (or the pill hidden): no timer at all.
     pub fn sync_pulse(&self) {
         // "Reduced" animations: only work in progress animates (as before); music and the sparkle hold still
-        let ambient = self.cfg.anim == 0 && (self.now.playing || (!self.tucked && self.cloud_ai()));
-        let moving = self.working() || ambient;
+        let ambient = self.cfg.anim == 0 && (self.now.playing || (!self.tucked && (self.cloud_ai() || self.tint_a > 0.01)));
+        let ducking = self.duck.ducking.load(Ordering::Relaxed); // the auto-lower badge breathes
+        let moving = self.working() || ambient || (ducking && !self.tucked && self.cfg.anim == 0);
         unsafe {
             if moving && self.want_visible {
                 SetTimer(Some(self.hwnd), TIMER_PULSE, self.frame_ms(), None);
@@ -1549,6 +1750,7 @@ impl App {
         if i != NONE {
             self.settings = None; // details, settings and the player share the panel
             self.music_open = false;
+            self.mixer = None;
         }
         if i != NONE {
             if self.hl_a < 0.05 {
@@ -1618,6 +1820,17 @@ impl App {
     fn step(&mut self) -> bool {
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
         self.last_frame = Instant::now();
+        // the rings glide to new readings on their own (they are moving pieces: cheap to redraw)
+        let mut rings = false;
+        for i in 0..5 {
+            let d = self.snap.frac[i] - self.disp[i];
+            if d.abs() < 0.003 {
+                self.disp[i] = self.snap.frac[i];
+            } else {
+                self.disp[i] += d * (1.0 - (-dt * 16.0).exp());
+                rings = true;
+            }
+        }
         let mut moving = false;
         let mut go = |v: &mut f32, t: f32, speed: f32, eps: f32| {
             let d = t - *v;
@@ -1628,14 +1841,17 @@ impl App {
                 moving = true;
             }
         };
-        for i in 0..5 {
-            go(&mut self.disp[i], self.snap.frac[i], 16.0, 0.003);
-        }
-        let open = self.sel != NONE || self.settings.is_some() || self.music_open;
+        let open = self.sel != NONE || self.settings.is_some() || self.music_open || self.mixer.is_some();
         go(&mut self.open, if open { 1.0 } else { 0.0 }, 14.0, 0.003);
         go(&mut self.hl_a, if self.sel != NONE { 1.0 } else { 0.0 }, 14.0, 0.003);
         go(&mut self.nav_t, 1.0, 16.0, 0.003);
         go(&mut self.tuck, if self.tucked { 1.0 } else { 0.0 }, 9.0, 0.003);
+        // song-cover colours glide to the new song's in about a second
+        let tint_to = self.tint_to;
+        for (k, v) in self.tint.iter_mut().enumerate() {
+            go(v, tint_to[k], 3.5, 0.5);
+        }
+        go(&mut self.tint_a, self.tint_a_to, 3.5, 0.003);
         if open {
             if let Some(c) = self.layout().cells.iter().find(|c| c.0 == self.sel) {
                 let t = [c.1.x, c.1.y, c.1.w, c.1.h];
@@ -1655,7 +1871,8 @@ impl App {
             }
             moving = true;
         }
-        moving
+        self.rings_only = rings && !moving; // only the rings glide: moving-only frames will do
+        moving || rings
     }
 
     // ---------- drawing ----------
@@ -1715,27 +1932,213 @@ impl App {
         true
     }
 
+    /// Draw everything.
     unsafe fn render(&mut self) {
+        unsafe { self.render_frame(false) };
+    }
+
+    /// Gentle ongoing animations (music bars and progress, Peter, the auto-lower badge): reuse the
+    /// cached still picture and paint only the moving pieces on top. Painting the whole pill in
+    /// software costs far more than these few shapes, so this keeps 60 fps light.
+    unsafe fn render_moving(&mut self) {
+        unsafe { self.render_frame(true) };
+    }
+
+    unsafe fn render_frame(&mut self, moving_only: bool) {
+        let t0 = Instant::now();
+        let partial = unsafe { self.render_frame_inner(moving_only) };
+        profile(partial, t0.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// A frame, in one of three ways (returns true when only the moving pieces were painted):
+    /// - nothing else animating: the still layer (moving pieces only recorded) is painted and
+    ///   cached, then the moving pieces go on top;
+    /// - `moving_only` with a cached still layer: copy it back, paint the moving pieces;
+    /// - otherwise (panels opening, tucking, recording, the card view): everything at once.
+    unsafe fn render_frame_inner(&mut self, moving_only: bool) -> bool {
         unsafe {
             let lay = self.layout();
             let (pw, ph) = ((lay.win_w * self.scale).ceil() as i32, (lay.win_h * self.scale).ceil() as i32);
             if !self.ensure_surface(pw, ph) {
-                return;
+                return false;
             }
+            let layered = !((self.anim_on && !self.rings_only) || self.working() || self.tuck > 0.001 || self.cfg.card);
+            let cached = self.content.as_ref().is_some_and(|c| (c.1, c.2) == (pw, ph)) && self.back.is_some_and(|s| (s.3, s.4) == (pw, ph));
+            let moving_only = moving_only && layered && cached;
             self.rt.SetDpi(96.0 * self.scale, 96.0 * self.scale);
             let rc = RECT { left: 0, top: 0, right: pw, bottom: ph };
             if self.rt.BindDC(self.memdc, &rc).is_err() {
-                return;
+                return false;
             }
-            self.rt.BeginDraw();
-            self.rt.Clear(Some(&color(0, 0.0)));
+            if layered && !moving_only {
+                // paint and cache both layers: the surfaces (background), then everything on them
+                // (content, on a clear background so it can go over the aurora)
+                Self::ensure_layer(&mut self.back, pw, ph);
+                self.moving.borrow_mut().clear();
+                self.auroras.borrow_mut().clear();
+                for (pass, layer) in [(3u8, self.back.map(|l| l.0)), (1u8, None)] {
+                    self.rt.BeginDraw();
+                    self.rt.Clear(Some(&color(0, 0.0)));
+                    self.pass = pass;
+                    if pass == 3 {
+                        self.draw_backgrounds(&lay);
+                    } else {
+                        self.draw_scene(&lay);
+                    }
+                    self.pass = 0;
+                    if self.rt.EndDraw(None, None).is_err() {
+                        return false;
+                    }
+                    if let Some(dc) = layer {
+                        let _ = BitBlt(dc, 0, 0, pw, ph, Some(self.memdc), 0, 0, SRCCOPY);
+                    }
+                }
+                // the content layer as a ready-to-draw image (one drawing pass per frame from here)
+                self.content = self.snapshot_bitmap(pw, ph).map(|b| (b, pw, ph));
+            }
+            if layered {
+                // compose: background → drifting aurora → content → moving pieces
+                if let Some((back, ..)) = self.back {
+                    let _ = BitBlt(self.memdc, 0, 0, pw, ph, Some(back), 0, 0, SRCCOPY);
+                }
+                self.rt.BeginDraw();
+                for (r, rad) in self.auroras.borrow().clone() {
+                    self.draw_aurora(r, rad);
+                }
+                if let Some((b, ..)) = &self.content {
+                    let full = D2D_RECT_F { left: 0.0, top: 0.0, right: pw as f32 / self.scale, bottom: ph as f32 / self.scale };
+                    self.rt.DrawBitmap(b, Some(&full), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+                }
+                self.draw_moving();
+            } else {
+                self.drop_layers(); // out of date now; made again when things settle
+                self.rt.BeginDraw();
+                self.rt.Clear(Some(&color(0, 0.0)));
+                self.draw_scene(&lay);
+            }
+            if self.rt.EndDraw(None, None).is_err() {
+                return false;
+            }
+            self.present(&lay, pw, ph);
+            moving_only
+        }
+    }
+
+    /// The background layer: every visible surface (pill, strip, open panel), nothing on them.
+    unsafe fn draw_backgrounds(&mut self, lay: &Layout) {
+        unsafe {
+            self.alpha = 1.0;
+            let p = lay.pill;
+            self.surface(p, if lay.vertical { p.w / 2.0 } else { p.h / 2.0 });
+            if let Some(s) = lay.strip {
+                self.surface(s, 16.0);
+            }
+            let metric_panel = self.panel_sel != NONE && self.cfg.shown[self.panel_sel];
+            if self.open > 0.003 && (self.settings.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
+                self.surface(lay.panel, 18.0);
+                if self.settings.is_some() {
+                    self.rt.FillRoundedRectangle(&self.rrect(lay.panel, 18.0), self.color(self.theme().bg, 0.85));
+                }
+            }
+        }
+    }
+
+    /// Record a moving piece during the still pass (true: recorded, so don't draw it now).
+    fn record(&self, m: Moving) -> bool {
+        if self.pass == 1 {
+            self.moving.borrow_mut().push((m, self.alpha));
+        }
+        self.pass == 1
+    }
+
+    /// Paint the recorded moving pieces where the still pass left them.
+    unsafe fn draw_moving(&mut self) {
+        let list = self.moving.borrow().clone();
+        self.pass = 2;
+        for (m, a) in list {
+            self.alpha = a;
+            match m {
+                Moving::Eq(x, base, h) => self.draw_eq(x, base, h),
+                Moving::Progress(r) => self.draw_progress(r),
+                Moving::Mascot(r, pill) => self.draw_mascot(r, pill),
+                Moving::Badge(r) => self.draw_mixer_button(r),
+                Moving::Ring(i, x, y, rad) => self.ring(i, x, y, rad),
+            }
+        }
+        self.alpha = 1.0;
+        self.pass = 0;
+    }
+
+    /// A cached layer: a second bitmap the size of the window.
+    unsafe fn ensure_layer(slot: &mut Option<(HDC, HBITMAP, HGDIOBJ, i32, i32)>, pw: i32, ph: i32) {
+        if slot.is_some_and(|s| (s.3, s.4) == (pw, ph)) {
+            return;
+        }
+        unsafe {
+            Self::free_layer(slot);
+            let dc = CreateCompatibleDC(None);
+            let bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: pw, biHeight: -ph, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            match CreateDIBSection(Some(dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(b) => {
+                    let old = SelectObject(dc, b.into());
+                    *slot = Some((dc, b, old, pw, ph));
+                }
+                Err(_) => {
+                    let _ = DeleteDC(dc);
+                }
+            }
+        }
+    }
+
+    unsafe fn free_layer(slot: &mut Option<(HDC, HBITMAP, HGDIOBJ, i32, i32)>) {
+        if let Some((dc, b, old, ..)) = slot.take() {
+            unsafe {
+                SelectObject(dc, old);
+                let _ = DeleteObject(b.into());
+                let _ = DeleteDC(dc);
+            }
+        }
+    }
+
+    unsafe fn drop_layers(&mut self) {
+        unsafe {
+            self.content = None;
+            Self::free_layer(&mut self.back);
+        }
+    }
+
+    /// What was just painted into the window bitmap, as an image the renderer can draw again.
+    unsafe fn snapshot_bitmap(&self, pw: i32, ph: i32) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: pw, biHeight: -ph, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+                ..Default::default()
+            };
+            let mut px = vec![0u8; (pw * ph * 4) as usize];
+            GetDIBits(self.memdc, self.bmp, 0, ph as u32, Some(px.as_mut_ptr() as *mut _), &bi as *const _ as *mut _, DIB_RGB_COLORS);
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0 * self.scale,
+                dpiY: 96.0 * self.scale,
+            };
+            self.rt.CreateBitmap(D2D_SIZE_U { width: pw as u32, height: ph as u32 }, Some(px.as_ptr() as *const _), (pw * 4) as u32, &props).ok()
+        }
+    }
+
+    /// The whole picture: pill (or card), strip, open panel, and the edge line when tucked.
+    unsafe fn draw_scene(&mut self, lay: &Layout) {
+        unsafe {
             self.alpha = 1.0 - self.tuck; // the pill fades as it tucks away, leaving the edge line
             if self.alpha > 0.005 {
                 // fully tucked: only the edge line is visible, so skip drawing the rest
                 if self.cfg.card {
-                    self.draw_card(&lay);
+                    self.draw_card(lay);
                 } else {
-                    self.draw_pill(&lay);
+                    self.draw_pill(lay);
                 }
                 if let Some(s) = lay.strip {
                     if self.job.is_some() {
@@ -1745,18 +2148,21 @@ impl App {
                     }
                 }
                 let metric_panel = !self.cfg.card && self.panel_sel != NONE && self.cfg.shown[self.panel_sel];
-                if self.open > 0.003 && (self.settings.is_some() || self.music_open || metric_panel) {
-                    self.draw_panel(&lay);
+                if self.open > 0.003 && (self.settings.is_some() || self.music_open || self.mixer.is_some() || metric_panel) {
+                    self.draw_panel(lay);
                 }
             }
             self.alpha = 1.0;
-            self.draw_edge_line(&lay);
-            if self.rt.EndDraw(None, None).is_err() {
-                return;
-            }
+            self.draw_edge_line(lay);
+        }
+    }
+
+    /// Hand the finished frame to Windows, at the pill's place (slid away when tucked).
+    unsafe fn present(&self, lay: &Layout, pw: i32, ph: i32) {
+        unsafe {
             // window position derives from the pill position so the pill never moves when the panel flips sides
             let (px, py) = self.cfg.pos.unwrap_or((0, 0));
-            let (sx, sy) = self.tuck_shift(&lay); // edge tuck slides the whole window
+            let (sx, sy) = self.tuck_shift(lay); // edge tuck slides the whole window
             let dst = POINT { x: px - (lay.pill.x * self.scale).round() as i32 + (sx as f32 * self.tuck) as i32, y: py - (lay.pill.y * self.scale).round() as i32 + (sy as f32 * self.tuck) as i32 };
             let size = SIZE { cx: pw, cy: ph };
             let blend = BLENDFUNCTION {
@@ -1770,16 +2176,39 @@ impl App {
     }
 
 
+    /// A rounded surface: shadow, fill, cover colours (the background layer, pass 3), then its
+    /// edge, glass shine and hourly sheen (the content layer, pass 1). Pass 0 draws all of it.
     unsafe fn surface(&self, r: R, rad: f32) {
         let th = self.theme();
         unsafe {
-            // soft shadow
-            for i in 0..7 {
-                let g = i as f32 * 1.6;
-                let s = R { x: r.x - g, y: r.y - g + 3.0, w: r.w + g * 2.0, h: r.h + g * 2.0 };
-                self.rt.FillRoundedRectangle(&self.rrect(s, rad + g), self.color(0, th.shadow_a * (1.0 - i as f32 / 7.0)));
+            if self.pass != 1 {
+                // soft shadow
+                for i in 0..7 {
+                    let g = i as f32 * 1.6;
+                    let s = R { x: r.x - g, y: r.y - g + 3.0, w: r.w + g * 2.0, h: r.h + g * 2.0 };
+                    self.rt.FillRoundedRectangle(&self.rrect(s, rad + g), self.color(0, th.shadow_a * (1.0 - i as f32 / 7.0)));
+                }
+                self.rt.FillRoundedRectangle(&self.rrect(r, rad), self.color(th.bg, th.bg_a * OPACITY[self.cfg.opacity].1));
+                // the song cover's colours, as a soft gradient across the surface
+                if self.tint_a > 0.01 {
+                    let c = |k: usize| ((self.tint[k] as u32) << 16) | ((self.tint[k + 1] as u32) << 8) | self.tint[k + 2] as u32;
+                    if let Some(b) = self.lin(r.x, r.y, r.x + r.w, r.y + r.h, &[(0.0, c(0), 0.44 * self.tint_a), (0.55, mix(c(0), c(3), 0.5), 0.32 * self.tint_a), (1.0, c(3), 0.42 * self.tint_a)]) {
+                        self.rt.FillRoundedRectangle(&self.rrect(r, rad), &b);
+                    }
+                    // the aurora drifts over the cover colours, always under the text and art: drawn
+                    // here in a full frame, or between the cached layers each moving frame
+                    if self.cfg.anim == 0 {
+                        if self.pass == 3 {
+                            self.auroras.borrow_mut().push((r, rad));
+                        } else {
+                            self.draw_aurora(r, rad);
+                        }
+                    }
+                }
             }
-            self.rt.FillRoundedRectangle(&self.rrect(r, rad), self.color(th.bg, th.bg_a * OPACITY[self.cfg.opacity].1));
+            if self.pass == 3 {
+                return; // the background layer stops here
+            }
             let e = R { x: r.x + 0.5, y: r.y + 0.5, w: r.w - 1.0, h: r.h - 1.0 };
             if th.glass {
                 // glass: a light catch across the top, and an edge that is bright on top and fades down
@@ -1838,6 +2267,9 @@ impl App {
     /// The living helper: a glossy blob with eyes. Idle it blinks now and then; while working it
     /// bobs and looks around; in explain mode its eyes follow your cursor.
     fn draw_mascot(&self, r: R, pill: R) {
+        if self.record(Moving::Mascot(r, pill)) {
+            return; // Peter is always a little alive: drawn by the moving pass
+        }
         let th = self.theme();
         let t = (unsafe { windows::Win32::System::SystemInformation::GetTickCount() } % 3_600_000) as f32 / 1000.0;
         let working = self.working();
@@ -2061,6 +2493,9 @@ impl App {
     }
 
     fn ring(&self, i: usize, cx: f32, cy: f32, rad: f32) {
+        if self.record(Moving::Ring(i, cx, cy, rad)) {
+            return; // it glides to each new reading: drawn by the moving pass
+        }
         let th = self.theme();
         let v = self.disp[i].clamp(0.0, 1.0);
         let c = if self.snap.frac[i] >= 0.9 { th.hot } else { th.accent[i] };
@@ -2088,6 +2523,10 @@ impl App {
             self.draw_gear(lay.gear);
             if let Some(m) = lay.music {
                 self.draw_music_cell(m, lay.vertical);
+            }
+            self.draw_mixer_button(lay.mixer);
+            if let Some(k) = lay.kbd {
+                self.draw_keyboard(k);
             }
             if let Some(cr) = lay.clock {
                 self.draw_clock(cr, lay.vertical, false);
@@ -2189,7 +2628,7 @@ impl App {
         unsafe {
             self.alpha = e;
             self.surface(r, 18.0);
-            if self.settings.is_some() {
+            if self.settings.is_some() && self.pass != 1 {
                 // settings stay easy to read whatever the pill opacity: back the panel nearly solid
                 self.rt.FillRoundedRectangle(&self.rrect(r, 18.0), self.color(self.theme().bg, 0.85));
             }
@@ -2198,7 +2637,7 @@ impl App {
             if self.settings.is_some() {
                 self.draw_settings(r, full);
             } else {
-                if self.music_open { self.draw_music_panel(x, y, w) } else { self.draw_top(x, y, w, ps, TITLES[ps]) }
+                if self.mixer.is_some() { self.draw_mixer(x, y, w) } else if self.music_open { self.draw_music_panel(x, y, w) } else { self.draw_top(x, y, w, ps, TITLES[ps]) }
             }
             self.rt.PopAxisAlignedClip();
             self.alpha = 1.0;
@@ -2262,16 +2701,18 @@ impl App {
             self.draw_rec(lay.rec);
             self.draw_mascot(lay.mascot, lay.pill);
             self.draw_gear(lay.gear);
+            self.draw_mixer_button(lay.mixer);
             if let Some(cr) = lay.clock {
                 self.draw_clock(cr, false, true);
             } else {
                 self.text("ResourcePill", &self.f.title, R { x: c.x + 20.0, y: c.y + 14.0, w: 160.0, h: 20.0 }, th.fg, 1.0);
             }
             let live = format!("Live · every {}", INTERVALS[self.cfg.interval].0);
-            // right column: date over refresh rate (the big time sits on the left)
+            // right column: date over refresh rate (the big time sits on the left), ending just
+            // before the header buttons (speaker, gear, Peter, record)
             let (top, bottom) = if self.cfg.clock { (self.date_text.as_str(), live.as_str()) } else { (live.as_str(), "") };
-            self.text(top, &self.f.detail, R { x: c.x + 160.0, y: c.y + 9.0, w: c.w - 304.0, h: 16.0 }, th.fg, 0.7);
-            self.text(bottom, &self.f.detail, R { x: c.x + 160.0, y: c.y + 24.0, w: c.w - 304.0, h: 14.0 }, th.fg, 0.4);
+            self.text(top, &self.f.detail, R { x: c.x + 120.0, y: c.y + 9.0, w: c.w - 282.0, h: 16.0 }, th.fg, 0.7);
+            self.text(bottom, &self.f.detail, R { x: c.x + 120.0, y: c.y + 24.0, w: c.w - 282.0, h: 14.0 }, th.fg, 0.4);
             if let Some(r) = lay.cells.iter().find(|r| r.0 == self.hover && r.0 != self.sel) {
                 self.rt.FillRoundedRectangle(&self.rrect(r.1, 14.0), self.color(th.fg, 0.04));
             }
@@ -2370,7 +2811,7 @@ impl App {
     }
 
     /// Apply a menu command. Returns false for unknown ids.
-    fn command(&mut self, id: u32) {
+    pub fn command(&mut self, id: u32) {
         self.run_command(id);
         self.sync_pulse(); // a setting may start or stop an animation (e.g. Peter's AI sparkle)
     }
@@ -2439,6 +2880,15 @@ impl App {
             706 => self.cfg.chime = !self.cfg.chime,
             707 => self.cfg.half_chime = !self.cfg.half_chime,
             711 => self.cfg.cues = !self.cfg.cues,
+            713 => self.toggle_mixer(),
+            714 => {
+                self.cfg.duck = !self.cfg.duck;
+                self.duck.on.store(self.cfg.duck, Ordering::Relaxed);
+            }
+            715 => {
+                self.cfg.duck_ai = !self.cfg.duck_ai;
+                self.duck.ai.store(self.cfg.duck_ai, Ordering::Relaxed);
+            }
             712 => self.cfg.voice = !self.cfg.voice,
             1210 | 1211 => self.cfg.tx_cloud = id == 1211,
             709 => {
@@ -2497,6 +2947,21 @@ impl App {
             }
             910..=911 => self.cfg.anim = id - 910,
             920..=923 => self.cfg.fps = id - 920,
+            930..=932 => {
+                // one switch for smoothness vs. PC use: frame rate and animations together
+                (self.cfg.fps, self.cfg.anim) = [(3, 0), (2, 0), (0, 1)][id - 930];
+            }
+            717 => {
+                self.cfg.kbd_show = !self.cfg.kbd_show;
+                if let Some((x, y)) = self.cfg.pos {
+                    self.place_at(x, y, None);
+                }
+            }
+            716 => {
+                self.cfg.art_tint = !self.cfg.art_tint;
+                let cover = self.now.art.clone();
+                self.tint_from_cover(cover.as_deref().map(|v| v.as_slice()));
+            }
             900..=902 => {
                 self.cfg.smooth = id - 900;
                 self.shared.smoothing.store(self.cfg.smooth as u32, Ordering::Relaxed);
@@ -2568,6 +3033,10 @@ impl App {
                 self.rec.stop();
             }
             self.end_explain_mode(); // normal cursors back, hook removed
+            self.duck.stop.store(true, Ordering::Relaxed); // music back to your volume before exiting
+            if let Some(t) = self.duck_thread.take() {
+                let _ = t.join();
+            }
             self.cfg.save();
             let nid = NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: self.hwnd, uID: 1, ..Default::default() };
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
@@ -2762,16 +3231,45 @@ mod tests {
     #[test]
     fn settings_roundtrip_and_garbage() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, auto_hide: true, pos: Some((-100, 50)) };
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, auto_hide: true, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
         let l = Settings::load();
         assert_eq!((l.theme, l.shown, l.size, l.opacity, l.interval, l.vertical, l.card, l.smooth, l.pos), (4, s.shown, 2, 3, 0, true, true, 2, Some((-100, 50))));
-        assert_eq!((l.clock, l.anim, l.asr, l.llm, l.chime, l.explain, l.final_pass, l.keep_audio, l.cues, l.tx_cloud, l.voice, l.fps), (false, 1, 1, 2, false, 1, false, true, false, true, false, 1));
+        assert_eq!((l.clock, l.anim, l.asr, l.llm, l.chime, l.explain, l.final_pass, l.keep_audio), (false, 1, 1, 2, false, 1, false, true));
+        assert_eq!((l.cues, l.tx_cloud, l.voice, l.fps, l.duck, l.duck_ai), (false, true, false, 1, false, false));
+        assert_eq!((l.duck_roles.as_str(), l.art_tint, l.kbd_show), ("chrome=l", false, false));
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
         let g = Settings::load();
         assert_eq!((g.theme, g.size, g.shown, g.pos), (0, 1, [true; 5], None));
     }
+}
+
+/// `RP_PROFILE=1`: every 5 s, how many frames were drawn (full / only moving areas) and how long
+/// they took, in %TEMP%\rp-profile.txt. Off (and free) otherwise.
+fn profile(partial: bool, ms: f64) {
+    use std::cell::Cell;
+    thread_local!(static S: Cell<(u32, u32, f64, f64, Option<Instant>)> = const { Cell::new((0, 0, 0.0, 0.0, None)) });
+    thread_local!(static ON: bool = std::env::var_os("RP_PROFILE").is_some());
+    if !ON.with(|o| *o) {
+        return;
+    }
+    S.with(|s| {
+        let (mut full, mut part, mut full_ms, mut part_ms, since) = s.get();
+        let since = since.unwrap_or_else(Instant::now);
+        if partial {
+            (part, part_ms) = (part + 1, part_ms + ms);
+        } else {
+            (full, full_ms) = (full + 1, full_ms + ms);
+        }
+        if since.elapsed().as_secs() >= 5 {
+            let line = format!("full {full} ({:.1} ms each), moving-only {part} ({:.1} ms each)\n", full_ms / full.max(1) as f64, part_ms / part.max(1) as f64);
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("rp-profile.txt")).map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+            s.set((0, 0, 0.0, 0.0, Some(Instant::now())));
+        } else {
+            s.set((full, part, full_ms, part_ms, Some(since)));
+        }
+    });
 }

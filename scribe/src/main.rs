@@ -8,6 +8,7 @@
 //! `--bench <asr>` prints the model's real-time factor on its bundled test audio and exits.
 
 mod audio;
+mod listen;
 mod llm;
 mod net;
 mod viewer;
@@ -62,6 +63,8 @@ struct Args {
     out: PathBuf,
     threads: i32,
     bench: bool,
+    listen: bool, // --listen: tell the pill when people talk in the call app
+    voice_apps: Vec<String>, // --voice-apps discord,chrome: which apps listen mode hears
     summarise: Option<PathBuf>,
     download: Option<String>,
     explain: Option<String>, // "local" | "claude" | "gemini"
@@ -79,6 +82,8 @@ fn args() -> Args {
         out: PathBuf::new(),
         threads: (std::thread::available_parallelism().map_or(4, |n| n.get()) / 2).clamp(2, 6) as i32,
         bench: false,
+        listen: false,
+        voice_apps: Vec::new(),
         summarise: None,
         download: None,
         explain: None,
@@ -101,6 +106,8 @@ fn args() -> Args {
             "--explain" => a.explain = Some(v()),
             "--final" => a.final_asr = Some(v()).filter(|s| !s.is_empty()),
             "--keep-audio" => a.keep_audio = true,
+            "--listen" => a.listen = true,
+            "--voice-apps" => a.voice_apps = v().split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect(),
             "--refine" => a.refine = Some(v().into()),
             "--speakers-threshold" => a.diar_threshold = v().parse().unwrap_or(DIARIZE_THRESHOLD),
             "--bench" => {
@@ -290,7 +297,9 @@ fn bench(a: &Args) -> Result<(), String> {
 
 fn main() {
     let a = args();
-    let r = if a.bench {
+    let r = if a.listen {
+        listen::listen(&a)
+    } else if a.bench {
         bench(&a)
     } else if let Some(dir) = &a.refine {
         refine(&a, dir)

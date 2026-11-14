@@ -29,8 +29,16 @@ const HEAD: f32 = 24.0;
 const TOP: f32 = 44.0; // panel header
 const MAX_H: f32 = 460.0;
 
+/// Right-hand notes longer than this go on a second line under the label (never cut off).
+const LONG_NOTE: usize = 24;
+
+fn long_note(right: &str) -> bool {
+    right.chars().count() > LONG_NOTE
+}
+
 fn item_h(i: &MI) -> f32 {
     match i {
+        MI::Act { right, .. } | MI::Sub { right, .. } if long_note(right) => ROW + 14.0,
         MI::Act { .. } | MI::Sub { .. } => ROW,
         MI::Sep => SEP,
         MI::Head(_) => HEAD,
@@ -39,7 +47,7 @@ fn item_h(i: &MI) -> f32 {
 
 /// Commands that leave the panel (they open something or change what is on screen).
 fn closes_panel(id: usize) -> bool {
-    matches!(id, 1 | 999 | 800 | 1200 | 1201 | 1204 | 1300 | 1499) || (600..700).contains(&id) || (1400..1499).contains(&id)
+    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1300 | 1499) || (600..700).contains(&id) || (1400..1499).contains(&id)
 }
 
 impl App {
@@ -57,6 +65,16 @@ impl App {
                 MI::Sub { label: "Theme".into(), right: THEMES[cfg.theme.min(THEMES.len() - 1)].name.into(), items: pick(100, &THEMES.iter().map(|t| t.name).collect::<Vec<_>>(), cfg.theme) },
                 sub("Size", SIZES[cfg.size].0, pick(300, &SIZES.iter().map(|s| s.0).collect::<Vec<_>>(), cfg.size)),
                 sub("Background opacity", OPACITY[cfg.opacity].0, pick(400, &OPACITY.iter().map(|s| s.0).collect::<Vec<_>>(), cfg.opacity)),
+                {
+                    let level = match (cfg.fps, cfg.anim) { (3, 0) => "High", (2, 0) => "Medium", (0, 1) => "Low", _ => "Custom" };
+                    sub("Performance", level, vec![
+                        MI::Head("Higher is smoother but uses more of your PC".into()),
+                        act_r(930, "High", "60 fps · every animation", level == "High"),
+                        act_r(931, "Medium", "30 fps · lighter", level == "Medium"),
+                        act_r(932, "Low", "almost nothing · no animations", level == "Low"),
+                    ])
+                },
+                act(716, "Colours from the song cover", cfg.art_tint),
                 sub("Animations", ANIMS[cfg.anim].split(' ').next().unwrap_or(""), pick(910, &ANIMS, cfg.anim)),
                 sub("Frame rate", &format!("{} fps", FPS[cfg.fps.min(FPS.len() - 1)]), {
                     let mut v = vec![MI::Head("Higher is smoother but uses more CPU".into())];
@@ -141,7 +159,7 @@ impl App {
         library.push(MI::Sep);
         library.push(act(1499, "Open models folder", false));
 
-        let sounds = vec![act(706, "Hourly chime", cfg.chime), act(707, "Half-hour ding (softer)", cfg.half_chime), act(711, "Soft sounds (recording, highlights)", cfg.cues), MI::Sep, act(705, "Play the hourly chime + animation", false), act(708, "Play the half-hour ding", false)];
+        let sounds = vec![act(706, "Hourly chime", cfg.chime), act(707, "Half-hour ding (softer)", cfg.half_chime), act(711, "Soft sounds (recording, highlights)", cfg.cues), MI::Sep, act_r(713, "Volume mixer", "Ctrl+Alt+V", false), act_r(714, "Lower music when people talk", "Discord, calls", cfg.duck), act_r(715, "Smarter voice detection (AI)", "local", cfg.duck_ai), MI::Sep, act(705, "Play the hourly chime + animation", false), act(708, "Play the half-hour ding", false)];
 
         let start_with_windows = if cfg.admin_mode {
             MI::Act { id: 702, label: "Start with Windows".into(), right: "via the admin task".into(), checked: true, enabled: false }
@@ -149,6 +167,7 @@ impl App {
             act(702, "Start with Windows", autostart())
         };
         let system = vec![
+            act_r(717, "Show keyboard connection", "Bluetooth · cable · off", cfg.kbd_show),
             sub("Refresh rate", INTERVALS[cfg.interval].0, pick(500, &INTERVALS.iter().map(|s| s.0).collect::<Vec<_>>(), cfg.interval)),
             sub("Smoothing", SMOOTH[cfg.smooth].split(' ').next().unwrap_or(""), pick(900, &SMOOTH, cfg.smooth)),
             start_with_windows,
@@ -197,6 +216,7 @@ impl App {
         } else {
             self.select(NONE);
             self.music_open = false;
+            self.mixer = None;
             self.settings_cache = self.settings_items();
             self.settings = Some(Vec::new());
             self.settings_scroll = 0.0;
@@ -322,10 +342,16 @@ impl App {
                     if checked {
                         self.text("✓", &self.f.row_val, R { x: x + 14.0, y: ry + 6.0, w: 16.0, h: 18.0 }, th.accent[0], a);
                     }
-                    let right_w = if right.is_empty() { 0.0 } else { (w * 0.46).min(190.0) };
-                    self.text(label, &self.f.row, R { x: x + 34.0, y: ry + 6.0, w: w - 34.0 - right_w - 34.0, h: 18.0 }, th.fg, la * a);
-                    if !right.is_empty() {
-                        self.text(right, &self.f.detail, R { x: x + w - right_w - (if is_sub { 30.0 } else { 18.0 }), y: ry + 6.0, w: right_w, h: 18.0 }, th.fg, 0.5 * a);
+                    if long_note(right) {
+                        // a longer note (e.g. a speed prediction): its own line under the label
+                        self.text(label, &self.f.row, R { x: x + 34.0, y: ry + 4.0, w: w - 34.0 - 34.0, h: 18.0 }, th.fg, la * a);
+                        self.text(right, &self.f.small, R { x: x + 34.0, y: ry + 22.0, w: w - 34.0 - 34.0, h: 15.0 }, th.fg, 0.5 * a);
+                    } else {
+                        let right_w = if right.is_empty() { 0.0 } else { (w * 0.46).min(190.0) };
+                        self.text(label, &self.f.row, R { x: x + 34.0, y: ry + 6.0, w: w - 34.0 - right_w - 34.0, h: 18.0 }, th.fg, la * a);
+                        if !right.is_empty() {
+                            self.text(right, &self.f.detail, R { x: x + w - right_w - (if is_sub { 30.0 } else { 18.0 }), y: ry + 6.0, w: right_w, h: 18.0 }, th.fg, 0.5 * a);
+                        }
                     }
                     if is_sub {
                         self.text("›", &self.f.title, R { x: x + w - 26.0, y: ry + 4.0, w: 14.0, h: 20.0 }, th.fg, 0.5 * a);
@@ -333,6 +359,20 @@ impl App {
                 }
             }
             ry += h;
+        }
+        // more below (or above): a soft fade at that edge says the list scrolls
+        let view_top = y0 + TOP - 2.0;
+        let view_bottom = r.y + r.h - 6.0;
+        let fade = |from: f32, to: f32| {
+            if let Some(b) = self.lin(x, from, x, to, &[(0.0, th.bg, 0.0), (1.0, th.bg, 0.95 * a)]) {
+                unsafe { self.rt.FillRectangle(&R { x: r.x, y: from.min(to), w: r.w, h: (to - from).abs() }.d2d(), &b) };
+            }
+        };
+        if ry > view_bottom + 1.0 {
+            fade(view_bottom - 26.0, view_bottom);
+        }
+        if self.settings_scroll > 1.0 {
+            fade(view_top + 20.0, view_top);
         }
         unsafe { self.rt.PopAxisAlignedClip() };
     }

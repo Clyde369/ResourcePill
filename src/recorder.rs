@@ -60,7 +60,7 @@ pub fn recordings_dir() -> PathBuf {
     docs.unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Documents")).join("ResourcePill").join("Recordings")
 }
 
-fn helper() -> Option<PathBuf> {
+pub fn helper() -> Option<PathBuf> {
     let p = std::env::current_exe().ok()?.with_file_name("ResourcePill-Scribe.exe");
     p.exists().then_some(p)
 }
@@ -236,6 +236,7 @@ pub struct Job {
     pub text: String,      // answer, status or error
     pub progress: (u64, u64),
     pub at: Instant, // when it started (short notes clear themselves)
+    pub note: bool,  // just a message from Peter (not a failure): normal colours, clears itself
 }
 
 impl Job {
@@ -267,7 +268,7 @@ impl Job {
             notify();
         });
         let text = if kind == JobKind::Explain { "Thinking…".into() } else { "Starting download…".into() };
-        Ok(Job { child: Some(child), inbox, kind, state: JobState::Running, title, query, text, progress: (0, 0), at: Instant::now() })
+        Ok(Job { child: Some(child), inbox, kind, state: JobState::Running, title, query, text, progress: (0, 0), at: Instant::now(), note: false })
     }
 
     /// A finished job that only shows a message (e.g. "highlight some text first").
@@ -276,12 +277,13 @@ impl Job {
             child: None,
             inbox: Arc::new(Mutex::new(Vec::new())),
             kind,
-            state: JobState::Failed,
+            state: JobState::Done,
             title: title.into(),
             query: String::new(),
             text: text.into(),
             progress: (0, 0),
             at: Instant::now(),
+            note: true,
         }
     }
 

@@ -20,13 +20,22 @@ impl App {
     pub fn media_changed(&mut self) {
         let Some((shared, _)) = &self.media else { return };
         let n = shared.lock().map(|n| n.clone()).unwrap_or_default();
+        self.duck.set_media_app(if n.present { &n.app } else { "" }); // what is playing gets lowered automatically
         let resized = n.present != self.now.present;
         if n.art_id != self.now.art_id || n.art.is_none() {
             self.art = n.art.as_ref().and_then(|b| self.decode_art(b));
+            self.tint_from_cover(n.art.as_deref().map(|v| v.as_slice()));
         }
+        // only the song position (or volume, shown only in the open player) moved: the progress bar is a
+        // moving piece and redraws itself, so no full repaint is needed
+        let only_time = media::Now { pos: self.now.pos, stamp: self.now.stamp, volume: self.now.volume, ..n.clone() } == self.now && !self.music_open;
         self.now = n;
+        if only_time {
+            return;
+        }
         if !self.now.present {
             self.music_open = false;
+            self.tint_from_cover(None); // nothing playing: back to the plain theme
         }
         self.sync_pulse();
         unsafe {
@@ -39,11 +48,81 @@ impl App {
         }
     }
 
+    /// The aurora: two soft glows in the cover's colours drifting across a surface on their own
+    /// rhythms (9 s and 13 s, so the pattern never quite repeats), breathing with how loud the
+    /// music is, and now and then one of Peter's little sparkles twinkles where the light is.
+    pub(crate) fn draw_aurora(&self, r: R, rad: f32) {
+        use std::f32::consts::TAU;
+        let t = (unsafe { windows::Win32::System::SystemInformation::GetTickCount() } % 3_600_000) as f32 / 1000.0;
+        // how loud the PC is playing (one cheap meter read a frame), smoothed so it breathes, not flickers
+        let level = {
+            let mut m = self.beat_meter.borrow_mut();
+            if m.is_none() {
+                *m = media::volume::device().and_then(|d| unsafe { d.Activate(windows::Win32::System::Com::CLSCTX_ALL, None) }.ok());
+            }
+            let peak = m.as_ref().and_then(|m| unsafe { m.GetPeakValue() }.ok()).unwrap_or(0.0);
+            let b = self.beat.get();
+            let b = b + (peak - b) * if peak > b { 0.35 } else { 0.06 }; // quick to rise, slow to fall
+            self.beat.set(b);
+            b
+        };
+        let c = |k: usize| ((self.tint[k] as u32) << 16) | ((self.tint[k + 1] as u32) << 8) | self.tint[k + 2] as u32;
+        let glow = self.tint_a * (0.55 + 0.6 * level.min(1.0));
+        let blobs = [
+            // (colour, where along the surface 0..1, radius, strength)
+            (c(0), 0.5 + 0.42 * (t * TAU / 9.0).sin(), 0.34, 0.30),
+            (mix(c(3), c(0), 0.35), 0.5 + 0.42 * (t * TAU / 13.0 + 2.1).sin(), 0.42, 0.26),
+            (mix(c(0), 0xFFFFFF, 0.35), 0.5 + 0.45 * (t * TAU / 7.0 + 4.0).sin(), 0.18, 0.16),
+        ];
+        unsafe {
+            for (i, (rgb, along, size, strength)) in blobs.into_iter().enumerate() {
+                let wobble = 0.5 + 0.35 * (t * TAU / (5.0 + i as f32 * 2.3) + i as f32).sin();
+                let center = if r.w >= r.h { pt(r.x + r.w * along, r.y + r.h * wobble) } else { pt(r.x + r.w * wobble, r.y + r.h * along) };
+                let (rx, ry) = if r.w >= r.h { (r.w * size, r.h * 1.3) } else { (r.w * 1.3, r.h * size) };
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: color(rgb, strength * glow * self.alpha) }, D2D1_GRADIENT_STOP { position: 1.0, color: color(rgb, 0.0) }];
+                let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { continue };
+                let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center, gradientOriginOffset: pt(0.0, 0.0), radiusX: rx, radiusY: ry };
+                if let Ok(b) = self.rt.CreateRadialGradientBrush(&props, None, &coll) {
+                    self.rt.FillRoundedRectangle(&self.rrect(r, rad), &b);
+                }
+            }
+        }
+        // Peter's touch: every 6 s a sparkle twinkles for a moment somewhere along the light
+        let cycle = t / 6.0;
+        let phase = cycle.fract();
+        if phase < 0.25 && self.tint_a > 0.5 {
+            let k = cycle.floor();
+            let spot = 0.12 + 0.76 * ((k * 0.618_034).fract()); // a different spot each time
+            let s = (phase / 0.25 * std::f32::consts::PI).sin() * 3.2;
+            let (x, y) = if r.w >= r.h { (r.x + r.w * spot, r.y + r.h * 0.28) } else { (r.x + r.w * 0.72, r.y + r.h * spot) };
+            self.sparkle(x, y, s);
+        }
+    }
+
+    /// Point the pill's colours at a cover (or back to the plain theme with None / the setting off).
+    pub fn tint_from_cover(&mut self, cover: Option<&[u8]>) {
+        let colours = cover.filter(|_| self.cfg.art_tint).and_then(Self::art_palette);
+        match colours {
+            Some((a, b)) => {
+                let f = |c: u32| [((c >> 16) & 255) as f32, ((c >> 8) & 255) as f32, (c & 255) as f32];
+                let (fa, fb) = (f(a), f(b));
+                self.tint_to = [fa[0], fa[1], fa[2], fb[0], fb[1], fb[2]];
+                if self.tint_a < 0.01 {
+                    self.tint = self.tint_to; // first colours fade in rather than sweep from black
+                }
+                self.tint_a_to = 1.0;
+            }
+            None => self.tint_a_to = 0.0,
+        }
+        self.kick();
+    }
+
     pub fn toggle_music(&mut self) {
         let open = !self.music_open;
         self.select(NONE);
         self.settings = None;
         self.music_open = open;
+        self.mixer = None;
         if let Some((x, y)) = self.cfg.pos {
             self.place_at(x, y, None);
         }
@@ -57,6 +136,24 @@ impl App {
     }
 
     /// JPEG/PNG bytes → a small premultiplied bitmap for the shared render target.
+    /// The cover's two theme colours: its most vivid colour, and a second one (another strong
+    /// colour if there is one, else a deep shade of the first). Read from a 24×24 copy.
+    pub(crate) fn art_palette(bytes: &[u8]) -> Option<(u32, u32)> {
+        unsafe {
+            let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+            let stream = wic.CreateStream().ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
+            let frame = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?.GetFrame(0).ok()?;
+            let scaler = wic.CreateBitmapScaler().ok()?;
+            scaler.Initialize(&frame, 24, 24, WICBitmapInterpolationModeFant).ok()?;
+            let conv = wic.CreateFormatConverter().ok()?;
+            conv.Initialize(&scaler, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut).ok()?;
+            let mut px = vec![0u8; 24 * 24 * 4];
+            conv.CopyPixels(std::ptr::null(), 24 * 4, &mut px).ok()?;
+            palette(&px)
+        }
+    }
+
     fn decode_art(&self, bytes: &[u8]) -> Option<ID2D1Bitmap> {
         unsafe {
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -99,7 +196,10 @@ impl App {
     }
 
     /// Three little bars that dance while music plays.
-    fn draw_eq(&self, x: f32, base: f32, h: f32) {
+    pub(crate) fn draw_eq(&self, x: f32, base: f32, h: f32) {
+        if self.record(Moving::Eq(x, base, h)) {
+            return; // moves every frame: drawn by the moving pass
+        }
         let t = (unsafe { windows::Win32::System::SystemInformation::GetTickCount() } % 3_600_000) as f32 / 1000.0;
         for k in 0..3 {
             let v = if self.now.playing { 0.35 + 0.65 * (0.5 + 0.5 * (t * (5.0 + k as f32 * 1.7) + k as f32 * 2.1).sin()) } else { 0.25 };
@@ -135,8 +235,17 @@ impl App {
             self.draw_eq(tx, c.y + 19.0, 9.0);
         }
         self.text(&self.now.title, &self.f.label, R { x: tx + eq, y: c.y + 7.0, w: tw - eq, h: 13.0 }, th.fg, 0.95);
-        let sub = if self.now.artist.is_empty() { &self.now.app } else { &self.now.artist };
-        self.text(sub, &self.f.small, R { x: tx, y: c.y + 21.0, w: tw, h: 14.0 }, th.fg, 0.55);
+        // while this music is turned down for someone talking, say so (it comes back by itself)
+        let lowered_for = (self.duck.own_level(&self.now.app).is_some())
+            .then(|| self.duck.talker.lock().ok().and_then(|t| t.as_ref().map(|(n, _)| format!("\u{2193} for {n}"))))
+            .flatten();
+        match lowered_for {
+            Some(note) => self.text(&note, &self.f.small, R { x: tx, y: c.y + 21.0, w: tw, h: 14.0 }, th.accent[0], 0.95),
+            None => {
+                let sub = if self.now.artist.is_empty() { &self.now.app } else { &self.now.artist };
+                self.text(sub, &self.f.small, R { x: tx, y: c.y + 21.0, w: tw, h: 14.0 }, th.fg, 0.55);
+            }
+        }
         self.draw_progress(R { x: tx, y: c.y + c.h - 6.0, w: tw, h: 2.0 });
         for (cmd, b) in Self::cell_buttons(c) {
             let icon = match cmd {
@@ -154,7 +263,10 @@ impl App {
     }
 
     /// How far through the song: a track with the played part in the accent colour.
-    fn draw_progress(&self, r: R) {
+    pub(crate) fn draw_progress(&self, r: R) {
+        if self.record(Moving::Progress(r)) {
+            return;
+        }
         if self.now.len <= 0.0 {
             return; // live streams have no length
         }
@@ -292,5 +404,79 @@ impl App {
                 self.send(*cmd);
             }
         }
+    }
+}
+
+/// Theme colours from BGRA pixels: vivid colours are grouped by hue (12 groups) and weighed by
+/// how colourful and bright they are. The strongest group is the main colour; a second strong
+/// group at least 60° away is the second colour, else a deep shade of the main one (so a purple
+/// and black cover gives purple fading to near-black).
+pub fn palette(px: &[u8]) -> Option<(u32, u32)> {
+    let mut bins = [(0f32, 0f32, 0f32, 0f32); 12]; // weighted r, g, b, weight
+    let mut all = (0f32, 0f32, 0f32, 0f32);
+    for p in px.chunks_exact(4) {
+        let (b, g, r, a) = (p[0] as f32, p[1] as f32, p[2] as f32, p[3]);
+        if a < 128 {
+            continue;
+        }
+        all = (all.0 + r, all.1 + g, all.2 + b, all.3 + 1.0);
+        let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+        let (s, v) = (if mx > 0.0 { (mx - mn) / mx } else { 0.0 }, mx / 255.0);
+        if s < 0.25 || v < 0.2 {
+            continue; // greys, whites and near-blacks don't decide the colour
+        }
+        let d = mx - mn;
+        let hue = if mx == r { ((g - b) / d).rem_euclid(6.0) } else if mx == g { (b - r) / d + 2.0 } else { (r - g) / d + 4.0 } * 60.0;
+        let w = s * v * s;
+        let k = ((hue / 30.0) as usize).min(11);
+        bins[k] = (bins[k].0 + r * w, bins[k].1 + g * w, bins[k].2 + b * w, bins[k].3 + w);
+    }
+    if all.3 == 0.0 {
+        return None;
+    }
+    let rgb = |(r, g, b, w): (f32, f32, f32, f32)| ((r / w).round() as u32) << 16 | ((g / w).round() as u32) << 8 | (b / w).round() as u32;
+    let mut order: Vec<usize> = (0..12).filter(|&k| bins[k].3 > 0.0).collect();
+    order.sort_by(|a, b| bins[*b].3.total_cmp(&bins[*a].3));
+    let average = rgb(all);
+    let Some(&first) = order.first() else {
+        return Some((average, crate::mix(average, 0, 0.6))); // no vivid colour: the cover's overall tone
+    };
+    let main = rgb(bins[first]);
+    let far = |k: usize| {
+        let d = (k as i32 - first as i32).rem_euclid(12);
+        d.min(12 - d) >= 2
+    };
+    let second = order.iter().skip(1).find(|&&k| far(k) && bins[k].3 >= bins[first].3 * 0.25).map(|&k| rgb(bins[k])).unwrap_or_else(|| crate::mix(main, 0x050508, 0.75));
+    Some((main, second))
+}
+
+#[cfg(test)]
+mod palette_tests {
+    fn img(colors: &[(u8, u8, u8)]) -> Vec<u8> {
+        (0..576).flat_map(|i| {
+            let (r, g, b) = colors[i * colors.len() / 576];
+            [b, g, r, 255]
+        }).collect()
+    }
+
+    #[test]
+    fn purple_and_black_cover() {
+        let (main, second) = super::palette(&img(&[(140, 40, 220), (0, 0, 0)])).unwrap();
+        assert_eq!(main, 0x8C28DC, "the purple leads");
+        let (r, g, b) = ((second >> 16) & 255, (second >> 8) & 255, second & 255);
+        assert!(r < 60 && g < 30 && b < 80, "then a deep purple-black: {second:06X}");
+    }
+
+    #[test]
+    fn two_colour_cover_keeps_both() {
+        let (main, second) = super::palette(&img(&[(230, 60, 40), (230, 60, 40), (40, 90, 230)])).unwrap();
+        assert_eq!(main, 0xE63C28, "the bigger colour leads");
+        assert_eq!(second, 0x285AE6, "the other strong colour follows");
+    }
+
+    #[test]
+    fn grey_cover_uses_its_tone() {
+        assert!(super::palette(&img(&[(120, 120, 120)])).is_some());
+        assert!(super::palette(&[0u8; 16]).is_none(), "fully transparent: nothing to go on");
     }
 }

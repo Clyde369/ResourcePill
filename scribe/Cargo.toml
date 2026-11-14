@@ -12,4 +12,5 @@ path = "src/main.rs"
 [dependencies]
 sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"] } # DLL build: the static lib needs a newer MSVC STL
 serde_json = "1"
+windows-core = "0.62.2" # for #[implement] (the per-app audio capture callback)
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Networking_WinHttp", "Win32_Security_Cryptography"] }
