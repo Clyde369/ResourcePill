@@ -46,6 +46,11 @@ pub fn installed(id: &str) -> bool {
     catalog::find(id).is_some_and(|m| recorder::models_dir().join(m.id).join(m.marker).exists())
 }
 
+/// MB still to download for the GPU speech engine (0: installed).
+pub fn gpu_download_mb() -> u32 {
+    catalog::GPU_RUNTIME.iter().filter(|id| !installed(id)).filter_map(|id| catalog::find(id)).map(|m| m.size_mb).sum()
+}
+
 impl App {
     /// What recording needs with the current choices (plus the local summary model if chosen).
     pub fn needed(&self) -> Vec<&'static str> {
@@ -56,6 +61,13 @@ impl App {
                 v.extend(["llama.cpp", "cudart"]);
                 if let Some(m) = catalog::MODELS.iter().find(|m| m.id == *dir) {
                     v.push(m.id);
+                }
+            }
+        }
+        if self.use_gpu() {
+            for id in catalog::GPU_RUNTIME {
+                if !v.contains(&id) {
+                    v.push(id);
                 }
             }
         }

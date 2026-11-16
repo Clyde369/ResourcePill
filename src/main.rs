@@ -180,12 +180,14 @@ struct Settings {
     rec_dir: String, // where recordings go (empty: the default, Documents/ResourcePill/Recordings)
     auto_hide: bool, // tuck into the screen edge when the mouse is away
     keep_audio: bool,
+    gpu: bool, // run the accurate pass on the NVIDIA GPU (downloads the GPU speech engine)
+    gpu_asked: bool, // asked once whether to use the GPU (no nagging after)
     pos: Option<(i32, i32)>, // pill top-left, physical px
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, gpu: false, gpu_asked: false, pos: None }
     }
 }
 
@@ -235,6 +237,8 @@ impl Settings {
                 "guide_done" => s.guide_done = v == "1",
                 "rec_dir" => s.rec_dir = v.trim().to_string(),
                 "auto_hide" => s.auto_hide = v == "1",
+                "gpu" => s.gpu = v == "1",
+                "gpu_asked" => s.gpu_asked = v == "1",
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
                         s.shown[i] = c == '1';
@@ -261,8 +265,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\ngpu={}\ngpu_asked={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), b(self.gpu), b(self.gpu_asked), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -1293,10 +1297,14 @@ impl App {
                 WM_APP_SCRIBE => {
                     let was_done = matches!(self.rec.state, recorder::State::Done);
                     if self.rec.pump() {
-                        if !was_done && matches!(self.rec.state, recorder::State::Done) {
+                        let saved = !was_done && matches!(self.rec.state, recorder::State::Done);
+                        if saved {
                             self.cue(extras::Cue::Saved);
                         }
                         self.after_rec_change();
+                        if saved && !self.use_gpu() {
+                            self.ask_gpu();
+                        }
                     }
                 }
                 WM_TIMER if wp.0 == TIMER_PULSE => {
@@ -1526,7 +1534,8 @@ impl App {
                 };
                 let final_asr = if self.cfg.final_pass { recorder::final_model() } else { None };
                 let gemini = if self.cfg.tx_cloud { extras::load_key("gemini") } else { None };
-                match self.rec.start(asr, llm, final_asr, self.cfg.keep_audio, gemini, notify) {
+                let gpu = self.use_gpu() && setup::gpu_download_mb() == 0;
+                match self.rec.start(asr, llm, final_asr, self.cfg.keep_audio, gpu, gemini, notify) {
                     Ok(_) => self.cue(extras::Cue::RecStart),
                     Err(e) => {
                         self.rec.state = State::Failed;
@@ -1536,6 +1545,29 @@ impl App {
             }
         }
         self.after_rec_change();
+    }
+
+    /// The GPU is chosen for the accurate pass. Never in admin mode: the GPU engine's DLLs live in
+    /// the user-writable models folder, which an elevated process must not load.
+    fn use_gpu(&self) -> bool {
+        self.cfg.gpu && !admin::is_elevated()
+    }
+
+    /// Once, after the first recording improved on the CPU: offer the NVIDIA GPU instead.
+    fn ask_gpu(&mut self) {
+        if self.cfg.gpu_asked || !self.cfg.final_pass || self.cfg.tx_cloud || admin::is_elevated() || !recorder::nvidia_gpu() {
+            return;
+        }
+        self.cfg.gpu_asked = true;
+        self.cfg.save();
+        let mb = setup::gpu_download_mb();
+        let download = if mb > 0 { format!("It downloads the GPU speech engine once ({mb} MB).") } else { "The GPU speech engine is already downloaded.".into() };
+        let text = format!(
+            "Your transcript is saved. Peter is now making it more accurate on the CPU, which can take a while.\n\nUse your NVIDIA graphics card for this from now on (about 3× faster)?\n{download}\n\nYou can change this any time in Settings → Transcription."
+        );
+        if unsafe { MessageBoxW(Some(self.hwnd), &HSTRING::from(text), w!("Use your GPU for transcription?"), MB_YESNO | MB_ICONQUESTION) } == IDYES {
+            self.command(1207);
+        }
     }
 
     fn cue(&self, c: extras::Cue) {
@@ -3062,6 +3094,13 @@ impl App {
             }
             1202 => self.cfg.final_pass = !self.cfg.final_pass,
             1203 => self.cfg.keep_audio = !self.cfg.keep_audio,
+            1207 => {
+                self.cfg.gpu = !self.cfg.gpu;
+                self.cfg.gpu_asked = true;
+                if self.cfg.gpu {
+                    self.start_setup(); // download the GPU speech engine (with progress in the strip)
+                }
+            }
             1206 => {
                 self.pick_recordings_folder();
                 return;
@@ -3327,7 +3366,7 @@ mod tests {
     #[test]
     fn settings_roundtrip_and_garbage() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, pos: Some((-100, 50)) };
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, gpu: true, gpu_asked: true, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
@@ -3337,6 +3376,7 @@ mod tests {
         assert_eq!((l.cues, l.tx_cloud, l.voice, l.fps, l.duck, l.duck_ai), (false, true, false, 1, false, false));
         assert_eq!((l.duck_roles.as_str(), l.art_tint, l.kbd_show), ("chrome=l", false, false));
         assert_eq!(l.rec_dir, "D:/Meetings");
+        assert_eq!((l.gpu, l.gpu_asked), (true, true));
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
         let g = Settings::load();

@@ -2,7 +2,8 @@
 //! speaker labels, and writes a summary when stopped. Started by the pill only while recording.
 //!
 //! Protocol (stdout, one line each, tab-separated):
-//!   READY | SEG <secs> <speaker> <text> | STATUS <text> | SUMMARY <path> | DONE <folder> | ERROR <text>
+//!   READY | SEG <secs> <speaker> <text> | STATUS <text> | TRANSCRIPT <path> | SAVED <folder> | SUMMARY <path> | DONE <folder> | ERROR <text>
+//! SAVED: the live transcript is saved and openable; the helper keeps improving it until DONE.
 //! stdin: "stop" ends the recording.
 //!
 //! `--bench <asr>` prints the model's real-time factor on its bundled test audio and exits.
@@ -18,6 +19,7 @@ mod wav;
 mod catalog;
 
 use std::io::{BufRead, Write};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -70,6 +72,8 @@ struct Args {
     explain: Option<String>, // "local" | "claude" | "gemini"
     final_asr: Option<String>, // re-transcribe the saved audio with this model after stopping
     keep_audio: bool,
+    gpu: bool, // --gpu: run the accurate pass on the GPU (CUDA runtime downloaded), else the CPU
+    pass: Option<PathBuf>, // --pass <folder>: only the accurate pass, written to audio/accurate.json
     refine: Option<PathBuf>, // re-run the accurate pass on a recording folder that kept its audio
     diar_threshold: f32,
 }
@@ -89,6 +93,8 @@ fn args() -> Args {
         explain: None,
         final_asr: None,
         keep_audio: false,
+        gpu: false,
+        pass: None,
         refine: None,
         diar_threshold: DIARIZE_THRESHOLD,
     };
@@ -106,6 +112,9 @@ fn args() -> Args {
             "--explain" => a.explain = Some(v()),
             "--final" => a.final_asr = Some(v()).filter(|s| !s.is_empty()),
             "--keep-audio" => a.keep_audio = true,
+            "--gpu" => a.gpu = true,
+            "--pass" => a.pass = Some(v().into()),
+            "--provider" => CUDA.store(v() == "cuda", Ordering::Relaxed),
             "--listen" => a.listen = true,
             "--voice-apps" => a.voice_apps = v().split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect(),
             "--refine" => a.refine = Some(v().into()),
@@ -120,6 +129,13 @@ fn args() -> Args {
     a
 }
 
+/// `--provider cuda` (the GPU copy of this helper): speech models and diarization run on the GPU.
+static CUDA: AtomicBool = AtomicBool::new(false);
+
+fn provider() -> Option<String> {
+    CUDA.load(Ordering::Relaxed).then(|| "cuda".into())
+}
+
 fn s(p: &Path) -> Option<String> {
     Some(p.to_string_lossy().into_owned())
 }
@@ -129,13 +145,15 @@ fn recognizer(models: &Path, name: &str, threads: i32) -> Result<OfflineRecogniz
     let dir = models.join(name);
     let mut c = OfflineRecognizerConfig::default();
     c.model_config.num_threads = threads;
+    c.model_config.provider = provider();
     c.model_config.tokens = s(&dir.join("tokens.txt"));
     match name {
-        "parakeet-v3" => {
+        "parakeet-v3" | "parakeet-v3-fp32" => {
+            let q = if name == "parakeet-v3" { ".int8" } else { "" };
             c.model_config.transducer = OfflineTransducerModelConfig {
-                encoder: s(&dir.join("encoder.int8.onnx")),
-                decoder: s(&dir.join("decoder.int8.onnx")),
-                joiner: s(&dir.join("joiner.int8.onnx")),
+                encoder: s(&dir.join(format!("encoder{q}.onnx"))),
+                decoder: s(&dir.join(format!("decoder{q}.onnx"))),
+                joiner: s(&dir.join(format!("joiner{q}.onnx"))),
             };
             c.model_config.model_type = Some("nemo_transducer".into());
         }
@@ -290,9 +308,71 @@ fn bench(a: &Args) -> Result<(), String> {
     let text = transcribe(&rec, w.samples());
     let rtf = t.elapsed().as_secs_f64() / secs;
     println!("BENCH	{}	{rtf:.4}	{text}", a.asr);
-    // the pill reads this to predict live performance
-    let _ = std::fs::write(a.models.join(&a.asr).join("bench.txt"), format!("{rtf:.4}"));
+    // the pill reads this to predict live performance (on the CPU)
+    if provider().is_none() {
+        let _ = std::fs::write(a.models.join(&a.asr).join("bench.txt"), format!("{rtf:.4}"));
+    }
     Ok(())
+}
+
+/// `--pass <folder>`: only the accurate pass over a recording's saved audio, written to
+/// audio/accurate.json. Run by `gpu_pass` in the GPU copy of this helper.
+fn pass(a: &Args, dir: &Path) -> Result<(), String> {
+    let fid = a.final_asr.as_deref().ok_or("--final <model> is required")?;
+    let audio = dir.join("audio");
+    let lines = final_pass(a, fid, &audio.join("pc-audio.wav"), &audio.join("microphone.wav"))?;
+    std::fs::write(audio.join("accurate.json"), serde_json::to_string(&lines).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+/// The accurate pass on the GPU. Windows loads DLLs from the exe's own folder first, so a copy of
+/// this helper inside the CUDA runtime folder gets the CUDA build of sherpa-onnx/onnxruntime;
+/// cuBLAS and cuDNN are found through PATH.
+/// The speech model of the GPU pass: full precision (int8 models run partly on the CPU under CUDA).
+const GPU_ASR: &str = "parakeet-v3-fp32";
+
+fn gpu_pass(a: &Args, fid: &str) -> Result<Vec<(f64, String, String)>, String> {
+    let lib = a.models.join("sherpa-cuda").join("lib");
+    if !lib.join("onnxruntime_providers_cuda.dll").exists() {
+        return Err("GPU runtime not downloaded".into());
+    }
+    let exe = lib.join("ResourcePill-Scribe.exe");
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+    if stamp(&me) != stamp(&exe) {
+        let _ = std::fs::copy(&me, &exe); // in use by another pass: that copy is still fine
+    }
+    let dirs = [a.models.join("cudart"), a.models.join("cudnn").join("nvidia").join("cudnn").join("bin")];
+    let path = std::env::join_paths(dirs.into_iter().chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(&exe)
+        .args(["--provider", "cuda", "--final", fid, "--speakers-threshold", &a.diar_threshold.to_string()])
+        .arg("--models")
+        .arg(&a.models)
+        .arg("--pass")
+        .arg(&a.out)
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000) // no console window
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut err = String::new();
+    for l in std::io::BufReader::new(child.stdout.take().ok_or("no output pipe")?).lines().map_while(Result::ok) {
+        if l.starts_with("STATUS\t") {
+            let mut out = std::io::stdout().lock(); // already escaped: passed on as it is
+            let _ = writeln!(out, "{l} (GPU)");
+            let _ = out.flush();
+        } else if let Some(e) = l.strip_prefix("ERROR\t") {
+            err = e.to_string();
+        }
+    }
+    let code = child.wait().map_err(|e| e.to_string())?;
+    let json = a.out.join("audio").join("accurate.json");
+    match std::fs::read_to_string(&json).ok().and_then(|j| serde_json::from_str(&j).ok()) {
+        Some(lines) if code.success() => Ok(lines),
+        _ if !err.is_empty() => Err(err),
+        _ => Err(format!("GPU pass exited with {code}")),
+    }
 }
 
 fn main() {
@@ -303,6 +383,8 @@ fn main() {
         bench(&a)
     } else if let Some(dir) = &a.refine {
         refine(&a, dir)
+    } else if let Some(dir) = &a.pass {
+        pass(&a, dir)
     } else if let Some(id) = &a.download {
         download(&a, id)
     } else if let Some(how) = &a.explain {
@@ -422,6 +504,12 @@ fn record(a: &Args) -> Result<(), String> {
     let wavs_ok = [wav_out.take().map(|w| w.finish()), wav_mic.take().map(|w| w.finish())].iter().all(|r| matches!(r, Some(Ok(()))));
     drop(handle);
 
+    // the live transcript is usable right away; the slow steps below then overwrite it
+    lines.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let tpath = write_transcript(&a.out, &lines, &a.asr, dur, None, None)?;
+    emit("TRANSCRIPT", &[&tpath.to_string_lossy()]);
+    emit("SAVED", &[&a.out.to_string_lossy()]);
+
     // cloud (Gemini, key passed in the environment) or the accurate local pass over the saved audio
     let mut model_label = a.asr.clone();
     let gemini = std::env::var("RP_GEMINI_KEY").ok().filter(|k| !k.trim().is_empty());
@@ -447,10 +535,19 @@ fn record(a: &Args) -> Result<(), String> {
         if !wavs_ok {
             emit("STATUS", &["Couldn't save the audio, so kept the live transcript"]);
         } else {
-            match final_pass(a, fid, &audio_dir.join("pc-audio.wav"), &audio_dir.join("microphone.wav")) {
-                Ok(better) => {
+            let cpu = || final_pass(a, fid, &audio_dir.join("pc-audio.wav"), &audio_dir.join("microphone.wav")).map(|l| (l, fid.to_string()));
+            let r = if a.gpu {
+                gpu_pass(a, GPU_ASR).map(|l| (l, format!("{GPU_ASR} on the GPU"))).or_else(|e| {
+                    emit("STATUS", &[&format!("GPU pass failed ({e}) · using the CPU")]);
+                    cpu()
+                })
+            } else {
+                cpu()
+            };
+            match r {
+                Ok((better, model)) => {
                     lines = better;
-                    model_label = format!("{fid} (accurate pass after a live {} pass)", a.asr);
+                    model_label = format!("{model} (accurate pass after a live {} pass)", a.asr);
                 }
                 Err(e) => emit("STATUS", &[&format!("Accurate pass skipped ({e}); kept the live transcript")]),
             }
@@ -468,12 +565,7 @@ fn record(a: &Args) -> Result<(), String> {
 
     // transcript
     lines.sort_by(|x, y| x.0.total_cmp(&y.0));
-    let mut md = format!("# Transcript\n\nRecorded {} · {}:{:02} · speech model: {model_label}\n\n", local_stamp(), dur / 60, dur % 60);
-    for (t, who, text) in &lines {
-        md += &format!("**[{:02}:{:02}] {who}:** {text}\n\n", (*t as u64) / 60, (*t as u64) % 60);
-    }
-    let tpath = a.out.join("transcript.md");
-    std::fs::write(&tpath, &md).map_err(|e| e.to_string())?;
+    let tpath = write_transcript(&a.out, &lines, &model_label, dur, None, audio_file)?;
     emit("TRANSCRIPT", &[&tpath.to_string_lossy()]);
 
     // summary
@@ -501,26 +593,39 @@ fn record(a: &Args) -> Result<(), String> {
         }
     }
 
-    // data for the Recordings window
+    if summary_text.is_some() {
+        write_transcript(&a.out, &lines, &model_label, dur, summary_text.as_deref(), audio_file)?;
+    }
+    emit("DONE", &[&a.out.to_string_lossy()]);
+    Ok(())
+}
+
+/// Writes transcript.md and the Recordings window data (rec.js); returns the transcript's path.
+fn write_transcript(out: &Path, lines: &[(f64, String, String)], model: &str, dur: u64, summary: Option<&str>, audio: Option<&str>) -> Result<PathBuf, String> {
+    let mut md = format!("# Transcript\n\nRecorded {} · {}:{:02} · speech model: {model}\n\n", local_stamp(), dur / 60, dur % 60);
+    for (t, who, text) in lines {
+        md += &format!("**[{:02}:{:02}] {who}:** {text}\n\n", (*t as u64) / 60, (*t as u64) % 60);
+    }
+    let tpath = out.join("transcript.md");
+    std::fs::write(&tpath, &md).map_err(|e| e.to_string())?;
     let mut speakers: Vec<&str> = Vec::new();
-    for (_, who, _) in &lines {
+    for (_, who, _) in lines {
         if !speakers.contains(&who.as_str()) {
             speakers.push(who);
         }
     }
     let rec = serde_json::json!({
-        "title": title(summary_text.as_deref(), &lines),
+        "title": title(summary, lines),
         "date": local_stamp(),
         "duration": dur,
-        "model": model_label,
+        "model": model,
         "speakers": speakers,
         "lines": lines.iter().map(|(t, who, text)| serde_json::json!({"t": (t * 10.0).round() / 10.0, "who": who, "text": text})).collect::<Vec<_>>(),
-        "summary": summary_text,
-        "audio": audio_file,
+        "summary": summary,
+        "audio": audio,
     });
-    viewer::write_rec(&a.out, &rec)?;
-    emit("DONE", &[&a.out.to_string_lossy()]);
-    Ok(())
+    viewer::write_rec(out, &rec)?;
+    Ok(tpath)
 }
 
 /// A short title: the summary's first sentence, else the first thing said.
@@ -819,13 +924,13 @@ fn diarize(models: &Path, audio: &[f32], threads: i32, threshold: f32) -> Option
             pyannote: OfflineSpeakerSegmentationPyannoteModelConfig { model: s(&seg), ..Default::default() },
             num_threads: threads,
             debug: false,
-            provider: None,
+            provider: provider(),
         },
         embedding: SpeakerEmbeddingExtractorConfig {
             model: s(&voiceprint_model(models)),
             num_threads: threads,
             debug: false,
-            provider: None,
+            provider: provider(),
         },
         clustering: FastClusteringConfig { num_clusters: -1, threshold, compute_confidence: false },
         min_duration_on: 0.3,

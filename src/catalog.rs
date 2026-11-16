@@ -119,7 +119,48 @@ pub const MODELS: &[Model] = &[
         marker: "cudart64_13.dll",
         files: &[File { url: "https://github.com/ggml-org/llama.cpp/releases/download/b12317/cudart-llama-bin-win-cuda-13.5-x64.zip", sha256: Some("c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba"), unpack: true }],
     },
+    // full precision Parakeet v3 for the GPU pass (the int8 build runs badly on CUDA); pinned to
+    // one commit of k2-fsa's export, with Hugging Face's LFS digests
+    Model {
+        id: "parakeet-v3-fp32",
+        kind: Kind::Voice,
+        name: "Parakeet TDT 0.6B v3 (full precision, GPU)",
+        about: "the GPU accurate pass · same model as Parakeet, unquantized",
+        size_mb: 2550,
+        marker: "tokens.txt",
+        files: &[
+            File { url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/5fcc0122fe87e8365e339e467af90c67b746218f/encoder.weights", sha256: Some("3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8"), unpack: false },
+            File { url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/5fcc0122fe87e8365e339e467af90c67b746218f/encoder.onnx", sha256: Some("36b758364dfddce472b9a9f75bf6049bbd35c886d7927e3eda80d4ceb3348512"), unpack: false },
+            File { url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/5fcc0122fe87e8365e339e467af90c67b746218f/decoder.onnx", sha256: Some("caed31af1bb08edcc09a01a1c3cbb4d4eb5bfdb9c4e5f307012f84bbf5dbfdbc"), unpack: false },
+            File { url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/5fcc0122fe87e8365e339e467af90c67b746218f/joiner.onnx", sha256: Some("0f294e5ba9021a3d80e492de94abe4c116f0afce78452c7debb5dd07690d0340"), unpack: false },
+            // last: its presence marks the model as installed
+            File { url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/5fcc0122fe87e8365e339e467af90c67b746218f/tokens.txt", sha256: Some("d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"), unpack: false },
+        ],
+    },
+    // the GPU speech engine: CUDA builds of sherpa-onnx + onnxruntime, cuDNN, and cuBLAS from "cudart"
+    Model {
+        id: "sherpa-cuda",
+        kind: Kind::Engine,
+        name: "GPU speech engine (NVIDIA CUDA)",
+        about: "runs the accurate pass on an NVIDIA GPU",
+        size_mb: 481,
+        marker: "lib/onnxruntime_providers_cuda.dll",
+        files: &[File { url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-cuda-13.x-cudnn-9.x-onnxruntime1.28.2-win-x64-cuda.tar.bz2", sha256: Some("206f56c80cca702ca564fb21e48462f4210a13f941de32c336a4c6debb1e9efb"), unpack: true }],
+    },
+    Model {
+        id: "cudnn",
+        kind: Kind::Engine,
+        name: "NVIDIA cuDNN 9",
+        about: "required by the GPU speech engine",
+        size_mb: 407,
+        marker: "nvidia/cudnn/bin/cudnn64_9.dll",
+        // NVIDIA's redistributable wheel (a zip), with PyPI's published digest
+        files: &[File { url: "https://files.pythonhosted.org/packages/48/9c/26e6bdd31c97c389aa565b49c916be0dec17dd61dad6cd33fee286d1b946/nvidia_cudnn_cu13-9.28.1.4-py3-none-win_amd64.whl", sha256: Some("73d874c6bd8a1c75ca040228f77c4e163efe9bab3b65bd85914e2b7334ac68ee"), unpack: true }],
+    },
 ];
+
+/// What "use the GPU for transcription" downloads (cudart is shared with llama.cpp).
+pub const GPU_RUNTIME: [&str; 4] = ["sherpa-cuda", "cudnn", "cudart", "parakeet-v3-fp32"];
 
 pub fn find(id: &str) -> Option<&'static Model> {
     MODELS.iter().find(|m| m.id == id)

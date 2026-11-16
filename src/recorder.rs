@@ -40,6 +40,7 @@ pub struct Recorder {
     pub status: String,
     pub summary: Option<PathBuf>,
     pub folder: Option<PathBuf>,
+    improving: bool, // saved (SAVED), the helper still working on a better version (until DONE)
 }
 
 pub fn models_dir() -> PathBuf {
@@ -91,6 +92,7 @@ impl Recorder {
             status: String::new(),
             summary: None,
             folder: None,
+            improving: false,
         }
     }
 
@@ -99,7 +101,7 @@ impl Recorder {
     }
 
     /// Starts recording. `notify` is called (from a background thread) whenever output arrives.
-    pub fn start(&mut self, asr: &str, llm: Option<PathBuf>, final_asr: Option<&str>, keep_audio: bool, gemini_key: Option<String>, notify: impl Fn() + Send + 'static) -> Result<(), String> {
+    pub fn start(&mut self, asr: &str, llm: Option<PathBuf>, final_asr: Option<&str>, keep_audio: bool, gpu: bool, gemini_key: Option<String>, notify: impl Fn() + Send + 'static) -> Result<(), String> {
         let exe = helper().ok_or("ResourcePill-Scribe.exe is missing next to ResourcePill.exe")?;
         let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
         let folder = recordings_dir().join(format!("{}-{:02}-{:02} {:02}.{:02}.{:02}", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond));
@@ -110,6 +112,9 @@ impl Recorder {
         }
         if keep_audio {
             cmd.arg("--keep-audio");
+        }
+        if gpu {
+            cmd.arg("--gpu");
         }
         if let Some(k) = gemini_key {
             cmd.env("RP_GEMINI_KEY", k); // the environment, not the command line (which other apps can list)
@@ -125,6 +130,9 @@ impl Recorder {
             .spawn()
             .map_err(|e| format!("could not start the transcriber: {e}"))?;
         let out = child.stdout.take().ok_or("no output pipe")?;
+        // a fresh inbox: a previous recording still improving in the background finishes on its
+        // own (its files are rewritten when done) and its messages no longer reach this one
+        self.inbox = Arc::new(Mutex::new(Vec::new()));
         let inbox = self.inbox.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
@@ -141,6 +149,7 @@ impl Recorder {
         self.lines.clear();
         self.speakers.clear();
         self.summary = None;
+        self.improving = false;
         self.folder = Some(folder);
         self.status = "Loading speech model…".into();
         Ok(())
@@ -174,10 +183,17 @@ impl Recorder {
                         self.lines.pop_front();
                     }
                 }
-                "STATUS" if f.len() >= 2 => self.status = f[1].to_string(),
+                // the live transcript is saved: openable now, the helper keeps improving it until DONE
+                "SAVED" => {
+                    self.state = State::Done;
+                    self.improving = true;
+                    self.status = "Transcript saved · improving in background… click to open".into();
+                }
+                "STATUS" if f.len() >= 2 => self.status = if self.improving { format!("Saved · {} · click to open", f[1]) } else { f[1].to_string() },
                 "SUMMARY" if f.len() >= 2 => self.summary = Some(PathBuf::from(&f[1])),
                 "DONE" => {
                     self.state = State::Done;
+                    self.improving = false;
                     self.status = if self.summary.is_some() { "Summary ready · click to open".into() } else { "Transcript saved · click to open".into() };
                 }
                 "ERROR" if f.len() >= 2 => {
@@ -191,6 +207,9 @@ impl Recorder {
                         let _ = c.wait();
                     }
                     self.stdin = None;
+                    if std::mem::take(&mut self.improving) {
+                        self.status = "Transcript saved (couldn't improve it) · click to open".into();
+                    }
                     if self.busy() {
                         self.state = State::Failed;
                         if self.status.is_empty() || self.status.starts_with("Listening") {
@@ -375,6 +394,15 @@ pub fn vram_total() -> f64 {
             i += 1;
         }
         best as f64
+    }
+}
+
+/// An NVIDIA graphics card is present (the GPU speech engine needs CUDA).
+pub fn nvidia_gpu() -> bool {
+    use windows::Win32::Graphics::Dxgi::*;
+    unsafe {
+        let Ok(f) = CreateDXGIFactory1::<IDXGIFactory1>() else { return false };
+        (0..).map_while(|i| f.EnumAdapters1(i).ok()).any(|a| a.GetDesc1().is_ok_and(|d| d.VendorId == 0x10DE))
     }
 }
 
@@ -570,6 +598,29 @@ mod tests {
         assert_eq!(super::unescape(r"a\nb\tc\\d"), "a\nb\tc\\d");
         assert_eq!(super::unescape("plain"), "plain");
         assert_eq!(super::unescape("trailing\\"), "trailing\\");
+    }
+
+    #[test]
+    fn saved_is_openable_while_improving() {
+        use super::{Recorder, State};
+        let mut r = Recorder::new();
+        r.state = State::Finishing;
+        let feed = |r: &mut Recorder, l: &str| {
+            r.inbox.lock().unwrap().push(l.into());
+            r.pump();
+        };
+        feed(&mut r, "SAVED\tC:\\x");
+        assert!(r.state == State::Done && !r.busy(), "openable, a new recording may start");
+        feed(&mut r, "STATUS\tImproving accuracy · 40%");
+        assert_eq!(r.status, "Saved · Improving accuracy · 40% · click to open");
+        feed(&mut r, "DONE\tC:\\x");
+        assert_eq!(r.status, "Transcript saved · click to open");
+        feed(&mut r, "EXIT");
+        assert!(r.state == State::Done, "a finished helper exiting is not a failure");
+        // the helper dies while improving: the live transcript stays, progress doesn't linger
+        feed(&mut r, "SAVED\tC:\\x");
+        feed(&mut r, "EXIT");
+        assert!(r.state == State::Done && r.status.starts_with("Transcript saved (couldn't"));
     }
 }
 
