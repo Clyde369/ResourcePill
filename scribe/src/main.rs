@@ -72,6 +72,8 @@ struct Args {
     keep_audio: bool,
     refine: Option<PathBuf>, // re-run the accurate pass on a recording folder that kept its audio
     diar_threshold: f32,
+    update_check: bool,                    // --update-check: print the latest GitHub release
+    update_get: Option<(String, PathBuf)>, // --update-get <url> <file>: download a release asset
 }
 
 fn args() -> Args {
@@ -91,6 +93,8 @@ fn args() -> Args {
         keep_audio: false,
         refine: None,
         diar_threshold: DIARIZE_THRESHOLD,
+        update_check: false,
+        update_get: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -109,6 +113,8 @@ fn args() -> Args {
             "--listen" => a.listen = true,
             "--voice-apps" => a.voice_apps = v().split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect(),
             "--refine" => a.refine = Some(v().into()),
+            "--update-check" => a.update_check = true,
+            "--update-get" => a.update_get = Some((v(), v().into())),
             "--speakers-threshold" => a.diar_threshold = v().parse().unwrap_or(DIARIZE_THRESHOLD),
             "--bench" => {
                 a.bench = true;
@@ -303,6 +309,10 @@ fn main() {
         bench(&a)
     } else if let Some(dir) = &a.refine {
         refine(&a, dir)
+    } else if a.update_check {
+        update_check()
+    } else if let Some((url, dest)) = &a.update_get {
+        update_get(url, dest)
     } else if let Some(id) = &a.download {
         download(&a, id)
     } else if let Some(how) = &a.explain {
@@ -610,6 +620,36 @@ fn download(a: &Args, id: &str) -> Result<(), String> {
         return Err(format!("{} downloaded but looks incomplete", m.name));
     }
     emit("INSTALLED", &[m.id]);
+    Ok(())
+}
+
+/// Latest GitHub release of the app: `RELEASE <tag> <exe url> <digest>`, or nothing when there is
+/// none (404, no ResourcePill.exe asset). The pill compares versions and checks the digest itself.
+fn update_check() -> Result<(), String> {
+    let (status, body, _) = net::send("GET", "https://api.github.com/repos/Clyde369/ResourcePill/releases/latest", "Accept: application/vnd.github+json\r\n", &[], None)?;
+    if status == 200 {
+        if let Some(r) = release(&body) {
+            emit("RELEASE", &[&r[0], &r[1], &r[2]]);
+        }
+    }
+    Ok(())
+}
+
+/// Tag, download URL and digest of the release's ResourcePill.exe asset (exact name).
+fn release(body: &str) -> Option<[String; 3]> {
+    let j: serde_json::Value = serde_json::from_str(body).ok()?;
+    let x = j["assets"].as_array()?.iter().find(|x| x["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("ResourcePill.exe")))?;
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
+    Some([j["tag_name"].as_str()?.to_string(), s(&x["browser_download_url"]), s(&x["digest"])])
+}
+
+/// Download the update. Over HTTPS only; what arrives is trusted only after the pill checks its SHA-256.
+fn update_get(url: &str, dest: &Path) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!("refusing to download from {url}"));
+    }
+    net::download(url, dest, |done, total| emit("PROGRESS", &["update", &done.to_string(), &total.to_string()]))?;
+    emit("INSTALLED", &["update"]);
     Ok(())
 }
 
@@ -962,4 +1002,17 @@ fn voiceprint_model(models: &Path) -> PathBuf {
     }
     let titanet = models.join("voiceprint").join("nemo_en_titanet_large.onnx");
     if titanet.exists() { titanet } else { models.join("speaker").join("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx") }
+}
+
+#[cfg(test)]
+mod update_tests {
+    #[test]
+    fn picks_the_app_asset() {
+        let body = r#"{"tag_name":"v0.2.0","assets":[
+            {"name":"ResourcePill-Scribe.exe","browser_download_url":"https://h/s.exe","digest":"sha256:11"},
+            {"name":"resourcepill.EXE","browser_download_url":"https://h/r.exe","digest":"sha256:22"}]}"#;
+        assert_eq!(super::release(body).unwrap(), ["v0.2.0", "https://h/r.exe", "sha256:22"].map(String::from));
+        assert!(super::release(r#"{"tag_name":"v0.2.0","assets":[{"name":"Peter.exe"}]}"#).is_none());
+        assert!(super::update_get("http://h/r.exe", std::path::Path::new("unused")).is_err());
+    }
 }

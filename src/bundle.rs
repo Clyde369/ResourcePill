@@ -31,7 +31,7 @@ fn exe_part(bytes: &[u8]) -> &[u8] {
 }
 
 /// Where the packed files start, if there are any.
-fn trailer(bytes: &[u8]) -> Option<u64> {
+pub(crate) fn trailer(bytes: &[u8]) -> Option<u64> {
     let n = bytes.len();
     (n >= 16 && &bytes[n - 8..] == MAGIC).then(|| u64::from_le_bytes(bytes[n - 16..n - 8].try_into().unwrap())).filter(|&s| (s as usize) <= n - 16)
 }
@@ -133,10 +133,9 @@ fn admin_only_dir(version: &str) -> Option<PathBuf> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::*;
     use windows::Win32::Security::*;
-    use windows::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
+    use windows::Win32::Storage::FileSystem::CreateDirectoryW;
     use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
     use windows::core::{HSTRING, w};
-    use std::os::windows::fs::MetadataExt;
 
     // from the registry, not %ProgramData% (a user can set their own environment variables)
     let root = unsafe {
@@ -154,22 +153,32 @@ fn admin_only_dir(version: &str) -> Option<PathBuf> {
         let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
         let created = CreateDirectoryW(&wide, Some(&sa)).is_ok();
         let _ = LocalFree(Some(HLOCAL(sd.0)));
-        if created {
-            return Some(dir);
-        }
         // already there: trust it only if it's a plain folder owned by an admin account
-        let meta = std::fs::symlink_metadata(&dir).ok()?;
-        if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            return None;
-        }
+        (created || admin_owned_dir(&dir)).then_some(dir)
+    }
+}
+
+/// A real folder (not a link) owned by Administrators or SYSTEM, which a normal user can't fake.
+pub(crate) fn admin_owned_dir(dir: &Path) -> bool {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::*;
+    use windows::Win32::Security::*;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    use std::os::windows::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::symlink_metadata(dir) else { return false };
+    if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return false;
+    }
+    unsafe {
         let mut owner = PSID::default();
         let mut desc = PSECURITY_DESCRIPTOR::default();
-        if GetNamedSecurityInfoW(&wide, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, &mut desc).is_err() {
-            return None;
+        if GetNamedSecurityInfoW(&windows::core::HSTRING::from(dir.as_os_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, &mut desc).is_err() {
+            return false;
         }
         let trusted = IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() || IsWellKnownSid(owner, WinLocalSystemSid).as_bool();
         let _ = LocalFree(Some(HLOCAL(desc.0)));
-        trusted.then_some(dir)
+        trusted
     }
 }
 

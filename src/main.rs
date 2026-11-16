@@ -17,6 +17,7 @@ mod snapshot;
 mod keyboard;
 mod bundle;
 mod setup;
+mod update;
 #[allow(dead_code)] // download fields are used by the helper
 mod catalog;
 
@@ -379,7 +380,16 @@ fn main() {
         }
         // One instance only; a second launch just shows the running one. A copy started by the
         // admin task (or the enable flow) waits briefly for the previous copy to finish exiting.
-        let handover = arg("--from-task") || arg("--enable-admin");
+        // `--after-update <pid>`: started by the copy it replaced; wait (up to a minute) for that one to exit
+        let after_update = std::env::args().skip_while(|a| a != "--after-update").nth(1).and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = after_update {
+            use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+            if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                WaitForSingleObject(h, 60_000);
+                let _ = CloseHandle(h);
+            }
+        }
+        let handover = arg("--from-task") || arg("--enable-admin") || after_update.is_some();
         let mut guard = None;
         for _ in 0..if handover { 100 } else { 1 } {
             let m = CreateMutexW(None, true, w!("Local\\ResourcePill.Single"));
@@ -630,6 +640,7 @@ struct App {
     setup_total: usize, // how many this round (for "2 of 4")
     setup_current: Option<&'static str>, // the one downloading now
     record_when_ready: bool, // record was pressed while getting ready
+    updating: Option<update::Release>, // the update being downloaded
 
     // dragging: cursor offset inside the pill as a fraction, so it survives orientation changes
     press: Option<(POINT, (f32, f32))>,
@@ -787,6 +798,7 @@ impl App {
                 setup_total: 0,
                 setup_current: None,
                 record_when_ready: false,
+                updating: None,
                 press: None,
                 dragging: false,
                 vol_drag: false,
@@ -825,6 +837,7 @@ impl App {
             }));
             self.media = Some(media::spawn(self.hwnd, WM_APP_MEDIA));
             self.check_keyboard(false);
+            update::spawn_checks();
             recorder::set_recordings_dir((!self.cfg.rec_dir.is_empty()).then(|| std::path::PathBuf::from(&self.cfg.rec_dir)));
             // out of the box: fetch what recording needs right away, and show the guide once
             for id in self.missing_for_recording() {
@@ -1259,6 +1272,7 @@ impl App {
                         }
                         self.after_rec_change();
                         self.setup_job_done(); // a setup download finished: on to the next
+                        self.update_job_done();
                     }
                 }
                 WM_TIMER if wp.0 == TIMER_TIP => self.hide_tip(),
@@ -1774,6 +1788,44 @@ impl App {
         let notify = self.job_notify();
         let args = vec!["--download".to_string(), id.to_string()];
         self.job = recorder::Job::start(recorder::JobKind::Download, format!("{} · {} MB", m.name, m.size_mb), String::new(), &args, None, notify).ok();
+        self.after_rec_change();
+    }
+
+    /// "New update available": the helper downloads it in the strip, then `update_job_done` installs it.
+    fn start_update(&mut self) {
+        let Some(r) = update::available() else { return };
+        if !update::safe_to_replace() {
+            // elevated, from a folder the user can write to: let them download it by hand
+            unsafe { ShellExecuteW(None, w!("open"), w!("https://github.com/Clyde369/ResourcePill/releases/latest"), None, None, SW_SHOWNORMAL) };
+            self.job = Some(recorder::Job::note(recorder::JobKind::Download, "Update", &format!("Update available ({}) · download it from the releases page", r.tag)));
+        } else if self.rec.busy() {
+            self.job = Some(recorder::Job::note(recorder::JobKind::Download, "Update", "Stop the recording first, then update"));
+        } else if self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) {
+            return; // one at a time
+        } else if let Some(dest) = update::download_path() {
+            let _ = std::fs::remove_file(&dest); // a fresh download, never a resumed leftover
+            let args = vec!["--update-get".to_string(), r.url.clone(), dest.display().to_string()];
+            self.job = recorder::Job::start(recorder::JobKind::Download, format!("Updating to {}", r.tag), String::new(), &args, None, self.job_notify()).ok();
+            self.updating = Some(r);
+        }
+        self.after_rec_change();
+    }
+
+    /// The update download finished: check and install it, then hand over to the new exe.
+    fn update_job_done(&mut self) {
+        let Some(job) = self.job.as_ref().filter(|j| j.state != recorder::JobState::Running && j.title.starts_with("Updating to ")) else { return };
+        let Some(r) = self.updating.take() else { return };
+        let msg = if job.state == recorder::JobState::Failed {
+            job.text.clone()
+        } else if self.rec.busy() {
+            "Stop the recording first, then update".into()
+        } else {
+            match update::install(&r) {
+                Ok(()) => return unsafe { self.quit() },
+                Err(e) => e,
+            }
+        };
+        self.job = Some(recorder::Job::note(recorder::JobKind::Download, "Update", &msg));
         self.after_rec_change();
     }
 
@@ -2993,6 +3045,10 @@ impl App {
             }
             1300 => {
                 self.explain_now();
+                return;
+            }
+            1500 => {
+                self.start_update();
                 return;
             }
             1310..=1312 => self.cfg.explain = id as usize - 1310,
