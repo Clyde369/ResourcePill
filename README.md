@@ -104,6 +104,11 @@ cargo build --release
 ```
 
 `target\release\resource-pill.exe --make-bundle "Peter the Pill.exe"` packs the app and the transcription helper into one exe.
+To publish an update that running copies offer under **New update available** (they check about once a day):
+1. Bump `version` in the root `Cargo.toml` (e.g. `0.2.0`), then `cargo build --release --workspace` and `--make-bundle ResourcePill.exe`.
+2. Create a GitHub release tagged `v0.2.0` (same number, with a `v`) and attach that `ResourcePill.exe`. Don't mark it a pre-release.
+3. The app installs it only if its SHA-256 matches the digest GitHub shows for the asset, so upload the exact file.
+
 `resource-pill.exe --snapshots <folder>` renders every view to PNGs (that's how the screenshots above are made).
 
 CPU temperature needs the [AMD Ryzen Master SDK](https://www.amd.com/en/products/software/ryzen-master.html) installed (`C:\Program Files\AMD\RyzenMasterSDK`) when building and running. Without it the app works normally, just without CPU temperature. No AMD files are included in this repository.

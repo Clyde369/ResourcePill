@@ -131,7 +131,8 @@ impl App {
 
     /// A download finished (or failed): on to the next one.
     pub fn setup_job_done(&mut self) {
-        if self.setup_current.is_none() || self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) {
+        // an update download is `update_job_done`'s, never a setup step
+        if self.setup_current.is_none() || self.updating.is_some() || self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) {
             return;
         }
         if self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Failed) {
