@@ -27,7 +27,6 @@ pub const TIMER_VIDEO: usize = 20; // hover bar + ghost peek: watches the mouse 
 const CLASS: PCWSTR = w!("ResourcePill.Video");
 
 static PILL: AtomicIsize = AtomicIsize::new(0);
-static FULL: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     // outside App so window messages that arrive while App is busy (our own SetWindowPos) still reach them
@@ -41,7 +40,6 @@ pub struct Video {
     fresh: bool,  // just opened: a link on the clipboard plays first
     watch: bool,  // showing YouTube's own watch page (embedding is off for this video)
     side: bool,   // live chat beside the video (window is wider)
-    full: bool,   // the player went full screen
     shown: bool,
     rect: RECT,
     inside: bool, // mouse over it
@@ -157,12 +155,12 @@ unsafe fn client(hwnd: HWND) -> RECT {
     r
 }
 
-/// Rounded corners (square while full screen).
+/// Rounded corners.
 unsafe fn round(hwnd: HWND) {
     unsafe {
         let r = client(hwnd);
-        let rad = if FULL.load(Ordering::Relaxed) { 0 } else { (RADIUS * GetDpiForWindow(hwnd) as f32 / 96.0) as i32 * 2 };
-        let rgn = if rad == 0 { None } else { Some(CreateRoundRectRgn(0, 0, r.right + 1, r.bottom + 1, rad, rad)) };
+        let rad = (RADIUS * GetDpiForWindow(hwnd) as f32 / 96.0) as i32 * 2;
+        let rgn = Some(CreateRoundRectRgn(0, 0, r.right + 1, r.bottom + 1, rad, rad));
         let _ = SetWindowRgn(hwnd, rgn, true); // the window owns the region from here
     }
 }
@@ -173,11 +171,11 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             // no frame: the page draws everything (WS_THICKFRAME is only there so it can be resized)
             WM_NCCALCSIZE if wp.0 != 0 => return LRESULT(0),
             WM_NCACTIVATE => return LRESULT(1),
-            // always just under the pill, so its panels open over the video (full screen: on top)
+            // always just under the pill, so its panels open over the video (YouTube's full screen just fills this window)
             WM_WINDOWPOSCHANGING => {
                 let p = &mut *(lp.0 as *mut WINDOWPOS);
                 let pill = PILL.load(Ordering::Relaxed);
-                if p.flags.0 & SWP_NOZORDER.0 == 0 && pill != 0 && !FULL.load(Ordering::Relaxed) {
+                if p.flags.0 & SWP_NOZORDER.0 == 0 && pill != 0 {
                     p.hwndInsertAfter = HWND(pill as *mut _);
                 }
             }
@@ -310,17 +308,6 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
             })),
             &mut token,
         )?;
-        wv.add_ContainsFullScreenElementChanged(
-            &ContainsFullScreenElementChangedEventHandler::create(Box::new(move |wv, _| {
-                let mut full = BOOL(0);
-                if let Some(wv) = wv {
-                    wv.ContainsFullScreenElement(&mut full)?;
-                }
-                send(format!("full:{}", full.0 != 0));
-                Ok(())
-            })),
-            &mut token,
-        )?;
         // links out of the player (title, logo, channel) go to your browser; Google sign-in (to chat) stays here
         wv.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
@@ -372,10 +359,6 @@ impl App {
         self.video.as_ref().is_some_and(|v| v.hidden)
     }
 
-    pub fn video_full(&self) -> bool {
-        self.video.as_ref().is_some_and(|v| v.full)
-    }
-
     pub fn video_open(&mut self) {
         if self.video.is_some() {
             return;
@@ -397,7 +380,7 @@ impl App {
             let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
             let Ok(hwnd) = CreateWindowExW(ex, CLASS, w!("YouTube · ResourcePill"), WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, 1, 1, None, None, Some(hinst.into()), None) else { return };
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            self.video = Some(Video { hwnd, hidden: false, fresh: true, watch: false, side: false, full: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
+            self.video = Some(Video { hwnd, hidden: false, fresh: true, watch: false, side: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
             self.video_place();
             if let Err(e) = start_webview(hwnd) {
                 inbox_fail(e).ok();
@@ -413,7 +396,6 @@ impl App {
             if let Some((c, _)) = WV.with(|w| w.borrow_mut().take()) {
                 let _ = c.Close();
             }
-            FULL.store(false, Ordering::Relaxed);
             let _ = DestroyWindow(v.hwnd);
         }
         INBOX.with(|i| i.borrow_mut().clear());
@@ -464,11 +446,7 @@ impl App {
     pub fn video_follow(&mut self, lay: &Layout) {
         let Some(v) = &self.video else { return };
         let show = !v.hidden && self.want_visible && self.tuck < 0.02;
-        let rect = if v.full {
-            monitor_rect(POINT { x: (v.rect.left + v.rect.right) / 2, y: (v.rect.top + v.rect.bottom) / 2 })
-        } else {
-            self.video_rect(lay)
-        };
+        let rect = self.video_rect(lay);
         let Some(v) = &mut self.video else { return };
         unsafe {
             if show && (rect != v.rect || !v.shown) {
@@ -484,7 +462,7 @@ impl App {
 
     /// Back just under the pill (after the pill put itself on top again).
     pub fn video_raise(&self) {
-        if let Some(v) = self.video.as_ref().filter(|v| v.shown && !v.full) {
+        if let Some(v) = self.video.as_ref().filter(|v| v.shown) {
             let _ = unsafe { SetWindowPos(v.hwnd, Some(self.hwnd), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
         }
     }
@@ -505,8 +483,8 @@ impl App {
     fn video_apply(&mut self) {
         let (ghost, alpha) = (self.cfg.video_ghost, ALPHAS[self.cfg.video_alpha.min(ALPHAS.len() - 1)]);
         let Some(v) = &mut self.video else { return };
-        let through = ghost && !v.unlocked && !v.full;
-        let want = (if through && v.inside { alpha.min(PEEK) } else if v.full { 100 } else { alpha }, through);
+        let through = ghost && !v.unlocked;
+        let want = (if through && v.inside { alpha.min(PEEK) } else { alpha }, through);
         if want == v.applied {
             return;
         }
@@ -638,21 +616,6 @@ impl App {
                 "ghost" => self.video_set_ghost(!self.cfg.video_ghost),
                 "hide" => self.video_hotkey(),
                 "close" => self.video_close(),
-                "full" => {
-                    let full = val == "true";
-                    FULL.store(full, Ordering::Relaxed);
-                    if let Some(v) = &mut self.video {
-                        v.full = full;
-                        unsafe {
-                            round(v.hwnd);
-                            if full {
-                                let _ = SetWindowPos(v.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE); // over the pill too
-                            }
-                        }
-                    }
-                    self.video_place();
-                    self.video_apply();
-                }
                 "ext" if val.starts_with("https://www.youtube.com/") => unsafe {
                     ShellExecuteW(None, w!("open"), &HSTRING::from(val), None, None, SW_SHOWNORMAL);
                 },

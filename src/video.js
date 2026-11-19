@@ -1,8 +1,7 @@
 // The YouTube window's page (src/video.rs injects it into every page it loads). Two places:
 //  - embed: our own page (https://%HOST%/player.html) with YouTube's embedded player
 //  - youtube.com itself: for browsing (and signing in), and for videos whose owner turned off
-//    embedding. On a watch page the player is stretched over the window and everything else hidden,
-//    unless you pressed Browse to see the whole page; opening another video stretches it again.
+//    embedding. On a watch page the player is stretched over the window and everything else hidden.
 // All get the same hover bar, live chat and resize edges. Talks to the pill with short strings:
 //  page → pill: ready:embed|youtube, open:<text>, watch:<id>|<list>|<start>, chat:<n>, side:<0|1>,
 //               alpha, ghost, hide, close, ext:<url>, size:<hit-test>
@@ -13,8 +12,8 @@
   if (window.top !== window || !window.chrome || !window.chrome.webview || !(yt || location.hostname === HOST)) return;
   const post = s => window.chrome.webview.postMessage(s);
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root;
-  let browsing = false, path = location.pathname;
-  const takeover = () => yt && location.pathname === '/watch' && !browsing; // player fills the window
+  let path = location.pathname;
+  const takeover = () => yt && location.pathname === '/watch'; // a video on YouTube's page fills the window
   const $ = id => root.querySelector('#rp-' + id);
 
   const CSS = `
@@ -73,7 +72,7 @@
   <div id="rp-bar">
     <input id="rp-url" placeholder="Paste a YouTube link and press Enter" spellcheck="false">
     <div id="rp-live">LIVE</div>
-    <button id="rp-browse" title="Browse YouTube: search, your subscriptions, sign in"><span class="i">&#xE80F;</span><span id="rp-browseTxt">Browse</span></button>
+    <button id="rp-browse" title="Browse YouTube: search, your subscriptions, sign in"><span class="i">&#xE80F;</span>Browse</button>
     <button id="rp-chatBtn" hidden title="Live chat: off, beside the video, or over it"><span class="i">&#xE8BD;</span><span id="rp-chatTxt">Chat</span></button>
     <button id="rp-alpha" title="See-through: click to cycle"><span class="i">&#xE706;</span><span id="rp-alphaTxt">100%</span></button>
     <button id="rp-ghost" title="Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Hold Ctrl to use it again."><span class="i">&#xE890;</span>Ghost</button>
@@ -123,7 +122,7 @@
     if (yt) {
       if (location.pathname !== path) {
         path = location.pathname;
-        setBrowsing(path === '/watch' ? false : browsing); // picked a video: it fills the window
+        layout();
       }
       player = document.getElementById('movie_player');
     }
@@ -131,17 +130,15 @@
     refresh();
   }
 
-  function setBrowsing(on) {
-    browsing = on;
+  function layout() {
     const take = takeover();
     if (document.documentElement.classList.contains('rp-take') !== take) {
       document.documentElement.classList.toggle('rp-take', take);
       setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
     }
     if (!root) return;
-    // on a watch page it switches between the stretched player and the whole page; elsewhere you're already browsing
-    $('browse').hidden = yt && location.pathname !== '/watch';
-    $('browseTxt').textContent = browsing && yt ? 'Player' : 'Browse';
+    // already browsing everywhere else on YouTube
+    $('browse').hidden = yt && !take;
   }
 
   function onError(code) {
@@ -202,7 +199,7 @@
     root.innerHTML = tt ? tt.createHTML(HTML) : HTML;
     document.body.append(root);
     if (!yt) root.classList.add('empty');
-    setBrowsing(browsing);
+    layout();
 
     window.chrome.webview.addEventListener('message', e => {
       const m = e.data;
@@ -233,7 +230,7 @@
     $('ghost').onclick = () => post('ghost');
     $('hide').onclick = () => post('hide');
     $('close').onclick = () => post('close');
-    $('browse').onclick = () => yt ? setBrowsing(!browsing) : (location.href = 'https://www.youtube.com/');
+    $('browse').onclick = () => { location.href = 'https://www.youtube.com/'; };
     root.querySelectorAll('.e').forEach(el => el.addEventListener('mousedown', e => {
       if (e.button === 0) { e.preventDefault(); post('size:' + el.id.slice(4)); }
     }));
