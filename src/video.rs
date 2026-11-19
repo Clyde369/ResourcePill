@@ -83,12 +83,78 @@ fn seconds(t: &str) -> Option<u32> {
     Some(total + n)
 }
 
-/// A YouTube link (watch, youtu.be, Shorts, live, embed, playlist, channel live) or a bare video id.
+/// What the bar was given: something to play on our page, or a page to open.
+#[derive(Debug, PartialEq)]
+pub enum Link {
+    Yt(Target),
+    Tw { channel: String, video: String, clip: String },
+    Web(String),
+}
+
+impl Link {
+    /// The message that starts it on our page (None: it's a page to open instead).
+    fn play_json(&self) -> Option<String> {
+        match self {
+            Link::Yt(t) => Some(format!(r#"{{"play":{{"kind":"yt","id":"{}","list":"{}","start":{},"channel":"{}"}}}}"#, t.id, t.list, t.start, t.channel)),
+            Link::Tw { channel, video, clip } => Some(format!(r#"{{"play":{{"kind":"tw","channel":"{channel}","video":"{video}","clip":"{clip}"}}}}"#)),
+            Link::Web(_) => None,
+        }
+    }
+}
+
+/// A YouTube or Twitch link plays on our page; an address opens as is; anything else is a search.
+/// None for other kinds of links (file:, ms-settings: …), which never open from here.
+pub fn classify(text: &str) -> Option<Link> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(y) = parse(t) {
+        return Some(Link::Yt(y));
+    }
+    if let Some(tw) = twitch(t) {
+        return Some(tw);
+    }
+    let spaced = t.contains(char::is_whitespace);
+    match t.split_once("://").map(|(s, _)| s.to_ascii_lowercase()) {
+        Some(s) if (s == "https" || s == "http") && !spaced => Some(Link::Web(t.to_string())),
+        Some(_) => None,
+        None if !spaced && (host(t).contains('.') || host(t) == "localhost") => Some(Link::Web(format!("https://{t}"))),
+        None => Some(Link::Web(format!("https://www.google.com/search?q={}", explainui::url_encode(t)))),
+    }
+}
+
+/// A Twitch channel, past broadcast or clip.
+pub fn twitch(text: &str) -> Option<Link> {
+    let t = text.trim();
+    let h = host(t);
+    let rest = t.split_once("://").map_or(t, |(_, r)| r);
+    let rest = rest.split_once('/').map_or("", |(_, r)| r).split('#').next().unwrap_or("");
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let q = |k: &str| query.split('&').find_map(|p| p.strip_prefix(k)?.strip_prefix('=')).unwrap_or("").to_string();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let name = |s: &str| (1..=25).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    const NOT_CHANNELS: [&str; 22] = ["directory", "downloads", "jobs", "p", "search", "settings", "subscriptions", "inventory", "wallet", "drops", "prime", "turbo", "login", "signup", "messages", "friends", "following", "store", "bits", "moderator", "popout", "videos"];
+    let (mut channel, mut video, mut clip) = (String::new(), String::new(), String::new());
+    match (h.as_str(), segs.as_slice()) {
+        ("clips.twitch.tv", ["embed"]) => clip = q("clip"),
+        ("clips.twitch.tv", [slug]) => clip = slug.to_string(),
+        ("player.twitch.tv", []) => {
+            channel = q("channel");
+            video = q("video").trim_start_matches('v').to_string();
+        }
+        ("twitch.tv" | "www.twitch.tv" | "m.twitch.tv", ["videos", id]) => video = id.to_string(),
+        ("twitch.tv" | "www.twitch.tv" | "m.twitch.tv", [_, "clip", slug]) => clip = slug.to_string(),
+        ("twitch.tv" | "www.twitch.tv" | "m.twitch.tv", [ch]) if !NOT_CHANNELS.contains(&ch.to_ascii_lowercase().as_str()) => channel = ch.to_ascii_lowercase(),
+        _ => return None,
+    }
+    let ok = (channel.is_empty() || name(&channel)) && video.bytes().all(|b| b.is_ascii_digit()) && safe(&clip);
+    (ok && !(channel.is_empty() && video.is_empty() && clip.is_empty())).then_some(Link::Tw { channel, video, clip })
+}
+
+/// A YouTube link (watch, youtu.be, Shorts, live, embed, playlist, channel live).
 pub fn parse(text: &str) -> Option<Target> {
     let t = text.trim();
-    if t.len() == 11 && safe(t) {
-        return Some(Target { id: t.into(), ..Default::default() });
-    }
     let host = self::host(t);
     let rest = t.split_once("://").map_or(t, |(_, r)| r);
     let rest = rest.split_once('/').map_or("", |(_, r)| r);
@@ -295,34 +361,26 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
         wv.cast::<ICoreWebView2_3>()?.SetVirtualHostNameToFolderMapping(&HSTRING::from(HOST), &HSTRING::from(page_dir.as_os_str()), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY)?;
 
         let mut token = 0i64;
-        // stays a YouTube window: anything else opens in your browser (Google sign-in, to chat, stays)
+        // web pages only: other kinds of links (file:, ms-settings:, app links…) never open from here,
+        // since the pill may be running as administrator
         wv.add_NavigationStarting(
             &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
                 let mut p = PWSTR::null();
                 args.Uri(&mut p)?;
                 let uri = take_pwstr(p);
-                let h = host(&uri);
-                let ok = h == HOST || is_youtube(&h) || h == "google.com" || h.ends_with(".google.com") || uri == "about:blank";
-                if !ok {
+                if !(uri.starts_with("https://") || uri.starts_with("http://") || uri == "about:blank") {
                     args.SetCancel(true)?;
-                    if uri.starts_with("https://") {
-                        ShellExecuteW(None, w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL);
-                    }
                 }
                 Ok(())
             })),
             &mut token,
         )?;
+        // the bar runs on every page, so any page can send these; none of them reach beyond this window
+        // (ext: only opens YouTube links in your browser)
         wv.add_WebMessageReceived(
             &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
-                let mut p = PWSTR::null();
-                args.Source(&mut p)?;
-                let from = host(&take_pwstr(p));
-                if from != HOST && from != "www.youtube.com" {
-                    return Ok(()); // only our page and YouTube's watch page (where video.js runs)
-                }
                 let mut p = PWSTR::null();
                 args.TryGetWebMessageAsString(&mut p)?;
                 let s = take_pwstr(p);
@@ -339,7 +397,6 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
             })),
             &mut token,
         )?;
-        // links out of the player (title, logo, channel) go to your browser; Google sign-in (to chat) stays here
         // a crashed page reloads; if the whole browser went down, the pill starts the window again
         wv.add_ProcessFailed(
             &ProcessFailedEventHandler::create(Box::new(move |wv, args| {
@@ -357,18 +414,21 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
             })),
             &mut token,
         )?;
+        // links that open a new tab open here instead; sized pop-ups (sign in with Google/Twitch…) stay pop-ups
         wv.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
+                let mut sized = BOOL(0);
+                args.WindowFeatures()?.HasSize(&mut sized)?;
+                if sized.as_bool() {
+                    return Ok(());
+                }
                 let mut p = PWSTR::null();
                 args.Uri(&mut p)?;
                 let uri = take_pwstr(p);
-                let sign_in = uri.starts_with("https://accounts.google.com/") || uri.contains("youtube.com/signin") || uri.contains("ServiceLogin");
-                if !sign_in {
-                    args.SetHandled(true)?;
-                    if uri.starts_with("https://") {
-                        ShellExecuteW(None, w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL);
-                    }
+                args.SetHandled(true)?;
+                if uri.starts_with("https://") || uri.starts_with("http://") {
+                    navigate(&uri);
                 }
                 Ok(())
             })),
@@ -582,12 +642,19 @@ impl App {
         post(&format!(r#"{{"state":{{"chat":{},"alpha":{},"ghost":{}}}}}"#, self.cfg.video_chat.min(2), alpha, self.cfg.video_ghost));
     }
 
-    fn video_play(&mut self, text: &str) -> bool {
-        let Some(t) = parse(text) else { return false };
-        self.cfg.video_url = text.trim().to_string();
+    /// Play it on our page (YouTube, Twitch) or open the page; remembered so the window resumes there.
+    fn video_open_link(&mut self, link: Link) {
+        let away = self.video.as_ref().is_some_and(|v| v.watch);
+        self.cfg.video_url = match &link {
+            Link::Web(url) => url.clone(),
+            _ => self.cfg.video_url.clone(),
+        };
+        match link.play_json() {
+            None => navigate(&self.cfg.video_url),
+            Some(_) if away => navigate(&format!("https://{HOST}/player.html")), // it plays once our page is ready
+            Some(json) => post(&json),
+        }
         self.cfg.save();
-        post(&format!(r#"{{"play":{{"id":"{}","list":"{}","start":{},"channel":"{}"}}}}"#, t.id, t.list, t.start, t.channel));
-        true
     }
 
     pub fn video_set_alpha(&mut self, i: usize) {
@@ -618,33 +685,32 @@ impl App {
                 "ready" => {
                     self.video_state();
                     let Some(v) = &mut self.video else { continue };
-                    v.watch = val != "embed"; // on youtube.com
+                    v.watch = val != "embed"; // on some site, not our page
                     if v.watch {
                         continue;
                     }
-                    // first time: a YouTube link on the clipboard wins; otherwise carry on with the last one
+                    // just opened: a YouTube/Twitch link on the clipboard wins, else carry on where you were.
+                    // Back on our page later (Back, or a link to play): play what was asked; a site stays put
                     let fresh = std::mem::take(&mut v.fresh);
-                    let clip = extras::clipboard_text(self.hwnd).filter(|c| fresh && parse(c).is_some());
-                    let last = self.cfg.video_url.clone();
-                    if !clip.is_some_and(|c| self.video_play(&c)) {
-                        self.video_play(&last);
+                    let playable = |t: &str| classify(t).is_some_and(|l| l.play_json().is_some());
+                    let clip = extras::clipboard_text(self.hwnd).filter(|c| fresh && playable(c));
+                    let text = clip.unwrap_or_else(|| self.cfg.video_url.clone());
+                    if let Some(link) = classify(&text).filter(|l| fresh || l.play_json().is_some()) {
+                        if link.play_json().is_some() {
+                            self.cfg.video_url = text.trim().to_string();
+                        }
+                        self.video_open_link(link);
                     }
                 }
-                "open" => {
-                    if parse(val).is_none() {
-                        let hint = if val.contains("/@") || val.contains("/c/") || val.contains("/user/") {
-                            "For a channel, open its live stream or video and copy that link (youtube.com/watch?v=…)."
-                        } else {
-                            "Paste a link to a video, live stream, Short or playlist (youtube.com/watch?v=…, youtu.be/…)."
-                        };
-                        post(&format!(r#"{{"err":"{hint}"}}"#));
-                    } else if self.video.as_ref().is_some_and(|v| v.watch) {
-                        self.cfg.video_url = val.trim().to_string(); // back to our page, which plays it when ready
-                        navigate(&format!("https://{HOST}/player.html"));
-                    } else {
-                        self.video_play(val);
+                "open" => match classify(val) {
+                    Some(link) => {
+                        if link.play_json().is_some() {
+                            self.cfg.video_url = val.trim().to_string();
+                        }
+                        self.video_open_link(link);
                     }
-                }
+                    None => post(r#"{"err":"Only web addresses (https://…), YouTube and Twitch links, or a search."}"#),
+                },
                 // embedding is off for this video: YouTube's own page, in this window
                 "watch" => {
                     let mut it = val.split('|');
@@ -716,12 +782,51 @@ mod tests {
         assert_eq!(parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1&start=1h2m3s#x"), t("dQw4w9WgXcQ", "PL1", 3723, ""));
         assert_eq!(parse("https://www.youtube.com/channel/UCX6OQ3DkcsbYNE6H8uQQuVA/live"), t("", "", 0, "UCX6OQ3DkcsbYNE6H8uQQuVA"));
         assert_eq!(parse("https://www.youtube.com/embed/live_stream?channel=UCX6OQ3DkcsbYNE6H8uQQuVA"), t("", "", 0, "UCX6OQ3DkcsbYNE6H8uQQuVA"));
-        assert_eq!(parse("dQw4w9WgXcQ"), t("dQw4w9WgXcQ", "", 0, ""));
+        assert_eq!(parse("minecraft12"), None); // a word, not a video id
         // not YouTube, not a video, or would break out of the JSON
         assert_eq!(parse("https://notyoutube.com/watch?v=dQw4w9WgXcQ"), None);
         assert_eq!(parse("https://www.youtube.com/@IShowSpeed/live"), None);
         assert_eq!(parse("https://www.youtube.com/watch?v=dQw4w9WgX\"Q"), None);
         assert_eq!(parse("https://www.youtube.com/"), None);
         assert_eq!(parse("hello there"), None);
+    }
+
+    fn tw(channel: &str, video: &str, clip: &str) -> Option<Link> {
+        Some(Link::Tw { channel: channel.into(), video: video.into(), clip: clip.into() })
+    }
+    fn web(url: &str) -> Option<Link> {
+        Some(Link::Web(url.into()))
+    }
+
+    #[test]
+    fn twitch_links() {
+        assert_eq!(twitch("https://www.twitch.tv/IShowSpeed"), tw("ishowspeed", "", ""));
+        assert_eq!(twitch("twitch.tv/kai_cenat?sr=a"), tw("kai_cenat", "", ""));
+        assert_eq!(twitch("https://m.twitch.tv/videos/2280512345"), tw("", "2280512345", ""));
+        assert_eq!(twitch("https://www.twitch.tv/xqc/clip/FunnyClipSlug-AbC_123"), tw("", "", "FunnyClipSlug-AbC_123"));
+        assert_eq!(twitch("https://clips.twitch.tv/FunnyClipSlug"), tw("", "", "FunnyClipSlug"));
+        assert_eq!(twitch("https://player.twitch.tv/?channel=xqc&parent=x"), tw("xqc", "", ""));
+        // Twitch pages that aren't something to play: just browse them
+        assert_eq!(twitch("https://www.twitch.tv/directory"), None);
+        assert_eq!(twitch("https://www.twitch.tv/xqc/videos"), None);
+        assert_eq!(twitch("https://www.twitch.tv/"), None);
+        assert_eq!(twitch("https://www.twitch.tv/bad\"name"), None);
+    }
+
+    #[test]
+    fn what_the_bar_opens() {
+        assert!(matches!(classify("https://youtu.be/dQw4w9WgXcQ"), Some(Link::Yt(_))));
+        assert_eq!(classify("twitch.tv/xqc"), tw("xqc", "", ""));
+        assert_eq!(classify("discord.com/app"), web("https://discord.com/app"));
+        assert_eq!(classify(" https://example.com/a?b=c "), web("https://example.com/a?b=c"));
+        assert_eq!(classify("http://localhost:3000"), web("http://localhost:3000"));
+        assert_eq!(classify("best gta 6 clips"), web("https://www.google.com/search?q=best+gta+6+clips"));
+        assert_eq!(classify("twitch.tv"), web("https://twitch.tv"));
+        // never: other kinds of links, nothing at all
+        assert_eq!(classify("file:///C:/Windows/System32"), None);
+        assert_eq!(classify("ms-settings://display"), None);
+        assert_eq!(classify("   "), None);
+        // JSON-safe: what goes to the page is only checked characters
+        assert_eq!(tw("xqc", "", "").unwrap().play_json().unwrap(), r#"{"play":{"kind":"tw","channel":"xqc","video":"","clip":""}}"#);
     }
 }

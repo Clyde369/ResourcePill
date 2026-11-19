@@ -190,7 +190,7 @@ impl App {
             {
                 let open = self.video_is_open();
                 let alphas: Vec<String> = video::ALPHAS.iter().map(|a| if *a == 100 { "Solid".into() } else { format!("{a}%") }).collect();
-                let mut items = vec![act_r(1600, if open { "Close the video" } else { "Open (paste a link in it)" }, if open { "" } else { "Ctrl+Alt+Y" }, false)];
+                let mut items = vec![act_r(1600, if open { "Close it" } else { "Open (YouTube, Twitch, any site)" }, if open { "" } else { "Ctrl+Alt+Y" }, false)];
                 if open {
                     items.push(act_r(1601, if self.video_hidden() { "Show it again" } else { "Hide (sound keeps playing)" }, "Ctrl+Alt+Y", false));
                 }
@@ -201,7 +201,7 @@ impl App {
                     act_r(1630, "Ghost: clicks go through it", "Ctrl+Alt+G on/off · or hold Ctrl over it", cfg.video_ghost),
                     MI::Head("Resize it by dragging its edges".into()),
                 ]);
-                sub("YouTube under the pill", if !open { "" } else if self.video_hidden() { "hidden" } else { "open" }, items)
+                sub("Watch & browse under the pill", if !open { "" } else if self.video_hidden() { "hidden" } else { "open" }, items)
             },
             MI::Sep,
             appearance,

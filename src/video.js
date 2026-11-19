@@ -1,127 +1,125 @@
-// The YouTube window's page (src/video.rs injects it into every page it loads). Two places:
-//  - embed: our own page (https://%HOST%/player.html) with YouTube's embedded player
-//  - youtube.com itself: for browsing (and signing in), and for videos whose owner turned off
-//    embedding. On a watch page the player is stretched over the window and everything else hidden.
-// All get the same hover bar, live chat and resize edges. Talks to the pill with short strings:
-//  page → pill: ready:embed|youtube, open:<text>, watch:<id>|<list>|<start>, chat:<n>, side:<0|1>,
+// The window under the pill (src/video.rs injects this into every page it loads):
+//  - ours (https://%HOST%/player.html): the start page, and YouTube / Twitch players with live chat
+//  - www.youtube.com: a video page shows just its player, stretched over the window (videos whose
+//    owner turned off embedding play here); the rest of YouTube is ordinary browsing
+//  - any other site: ordinary browsing (sign in to anything; it stays signed in)
+// Every page gets the same hover bar and resize edges, in a closed shadow DOM so a site's styles
+// and security rules don't touch them. Talks to the pill with short strings:
+//  page → pill: ready:embed|site, open:<text>, watch:<id>|<list>|<start>, chat:<n>, side:<0|1>,
 //               alpha, ghost, hide, close, ext:<url>, size:<hit-test>
-//  pill → page: {play:{id,list,start,channel}}, {state:{chat,alpha,ghost}}, {hover:0|1}, {err:"…"}
+//  pill → page: {play:{kind:"yt",id,list,start,channel} | {kind:"tw",channel,video,clip}},
+//               {state:{chat,alpha,ghost}}, {hover:0|1}, {err:"…"}
 (() => {
   const HOST = '%HOST%';
-  const yt = location.hostname === 'www.youtube.com';
   if (window.top !== window || !window.chrome || !window.chrome.webview) return;
-  // Google's sign-in pages (and the "secure your account" ones after it): just a way back
-  if (location.hostname === 'google.com' || location.hostname.endsWith('.google.com')) {
-    const back = () => {
-      const b = document.createElement('button');
-      b.textContent = '← Back to YouTube';
-      b.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483647;padding:8px 14px;border:0;border-radius:16px;background:#202124;color:#fff;font:13px "Segoe UI",sans-serif;cursor:pointer;box-shadow:0 2px 10px #0006';
-      b.onclick = () => { location.href = 'https://www.youtube.com/'; };
-      document.body.append(b);
-    };
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', back); else back();
-    return;
-  }
-  if (!(yt || location.hostname === HOST)) return;
+  const ours = location.hostname === HOST;
+  const yt = location.hostname === 'www.youtube.com';
   const post = s => window.chrome.webview.postMessage(s);
-  let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root, ghost = null, toastTimer = 0;
-  let path = location.pathname;
+  let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, ghost = null, toastTimer = 0;
+  let root, ui = {}, path = location.pathname;
   const takeover = () => yt && location.pathname === '/watch'; // a video on YouTube's page fills the window
-  const $ = id => root.querySelector('#rp-' + id);
+  const playerPage = () => ours || takeover();
 
   const CSS = `
+  :host { all: initial; }
   #rp { position: fixed; inset: 0; z-index: 2147483600; pointer-events: none; color: #f2f2f2; font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; user-select: none; --side: 0px; }
   #rp * { box-sizing: border-box; }
-  #rp > * { pointer-events: auto; }
-  #rp-stage { position: absolute; left: 0; top: 0; bottom: 0; right: var(--side); background: #000; }
-  #rp-stage iframe, #rp-player { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-  #rp-chat { display: none; position: absolute; border: 0; background: #0f0f0f; }
-  #rp.side #rp-chat { display: block; right: 0; top: 0; height: 100%; width: 300px; border-left: 1px solid #ffffff14; }
-  #rp.over #rp-chat { display: block; right: 10px; top: 46px; height: calc(100% - 104px); width: min(36%, 340px); border-radius: 10px; opacity: .8; box-shadow: 0 4px 24px #0009; }
-  #rp-bar { position: absolute; left: 0; right: var(--side); top: 0; height: 44px; padding: 0 8px; display: flex; align-items: center; gap: 4px; background: linear-gradient(#000d, #0000); opacity: 0; pointer-events: none; transition: opacity .18s; }
-  #rp.ui #rp-bar, #rp.empty #rp-bar, #rp.err #rp-bar { opacity: 1; pointer-events: auto; }
-  #rp-url { flex: 1; min-width: 60px; height: 28px; border-radius: 14px; border: 1px solid #ffffff22; background: #ffffff14; color: inherit; padding: 0 12px; font: inherit; outline: none; user-select: text; }
-  #rp-url:focus { border-color: #5ac8fa; background: #000b; }
-  #rp button { height: 28px; min-width: 28px; padding: 0 9px; border: 0; border-radius: 14px; background: #ffffff16; color: inherit; font: inherit; display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; white-space: nowrap; flex: none; }
-  #rp button:hover { background: #ffffff2e; }
-  #rp button.on { background: #5ac8fa38; color: #9be7ff; }
-  #rp button[hidden] { display: none; }
-  #rp .i { font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-size: 12px; }
-  #rp-live { display: none; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: #ff6b6b; padding: 0 4px; }
-  #rp.live #rp-live { display: flex; }
-  #rp-live::before { content: ""; width: 7px; height: 7px; border-radius: 4px; background: #ff453a; }
-  #rp-msg { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 56px 24px 24px; background: radial-gradient(circle at 50% 40%, #1d1d24, #000 70%); }
-  #rp.empty #rp-msg, #rp.err #rp-msg { display: flex; }
-  #rp-msg b { font-size: 15px; font-weight: 600; }
-  #rp-msg span { opacity: .62; max-width: 440px; line-height: 1.45; }
-  #rp-msg button { margin-top: 6px; }
-  #rp-toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 90%; padding: 8px 14px; border-radius: 16px; background: #000c; font-size: 12.5px; text-align: center; opacity: 0; transition: opacity .25s; pointer-events: none !important; }
-  #rp-toast.on { opacity: 1; }
-  #rp .e { position: absolute; }
-  #rp-e10 { left: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
-  #rp-e11 { right: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
-  #rp-e12 { top: 0; left: 12px; right: 12px; height: 4px; cursor: ns-resize; }
-  #rp-e15 { bottom: 0; left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
-  #rp-e13 { left: 0; top: 0; width: 12px; height: 12px; cursor: nwse-resize; }
-  #rp-e14 { right: 0; top: 0; width: 12px; height: 12px; cursor: nesw-resize; }
-  #rp-e16 { left: 0; bottom: 0; width: 12px; height: 12px; cursor: nesw-resize; }
-  #rp-e17 { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
-  ` + (yt ? `
+  #stage { position: absolute; left: 0; top: 0; bottom: 0; right: var(--side); background: #000; pointer-events: auto; }
+  #stage iframe, #stage > div { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  #chat { display: none; position: absolute; border: 0; background: #0f0f0f; pointer-events: auto; }
+  #rp.side #chat { display: block; right: 0; top: 0; height: 100%; width: 300px; border-left: 1px solid #ffffff14; }
+  #rp.over #chat { display: block; right: 10px; top: 46px; height: calc(100% - 104px); width: min(36%, 340px); border-radius: 10px; opacity: .8; box-shadow: 0 4px 24px #0009; }
+  #bar { position: absolute; left: 0; right: var(--side); top: 0; height: 44px; padding: 0 8px; display: flex; align-items: center; gap: 4px; background: linear-gradient(#000d, #0000); opacity: 0; pointer-events: none; transition: opacity .18s; }
+  #rp.browse #bar { top: auto; bottom: 0; right: 0; background: linear-gradient(#0000, #000d); } /* the site's own top bar stays usable */
+  #rp.ui #bar, #rp.empty #bar, #rp.err #bar { opacity: 1; pointer-events: auto; }
+  #url { flex: 1; min-width: 60px; height: 28px; border-radius: 14px; border: 1px solid #ffffff22; background: #1c1c1fcc; color: inherit; padding: 0 12px; font: inherit; outline: none; user-select: text; }
+  #url:focus { border-color: #5ac8fa; background: #000d; }
+  button { height: 28px; min-width: 28px; padding: 0 9px; border: 0; border-radius: 14px; background: #2a2a2ecc; color: inherit; font: inherit; display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; white-space: nowrap; flex: none; }
+  button:hover { background: #3a3a40; }
+  button.on { background: #5ac8fa38; color: #9be7ff; }
+  [hidden] { display: none !important; }
+  .i { font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-size: 12px; }
+  #live { display: none; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: #ff6b6b; padding: 0 4px; }
+  #rp.live #live { display: flex; }
+  #live::before { content: ""; width: 7px; height: 7px; border-radius: 4px; background: #ff453a; }
+  #msg { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 56px 24px 24px; background: radial-gradient(circle at 50% 40%, #1d1d24, #000 70%); pointer-events: auto; }
+  #rp.empty #msg, #rp.err #msg { display: flex; }
+  #msg b { font-size: 15px; font-weight: 600; }
+  #msg span { opacity: .62; max-width: 460px; line-height: 1.45; }
+  #msg button { margin-top: 6px; }
+  #tiles { display: flex; gap: 10px; margin-top: 10px; }
+  #rp.err #tiles { display: none; }
+  #tiles button { height: 38px; padding: 0 16px; border-radius: 19px; font-weight: 600; }
+  #toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 90%; padding: 8px 14px; border-radius: 16px; background: #000c; font-size: 12.5px; text-align: center; opacity: 0; transition: opacity .25s; }
+  #rp.browse #toast { bottom: 56px; }
+  #toast.on { opacity: 1; }
+  .e { position: absolute; pointer-events: auto; }
+  #e10 { left: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
+  #e11 { right: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
+  #e12 { top: 0; left: 12px; right: 12px; height: 4px; cursor: ns-resize; }
+  #e15 { bottom: 0; left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
+  #e13 { left: 0; top: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+  #e14 { right: 0; top: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+  #e16 { left: 0; bottom: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+  #e17 { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+  `;
+  // on YouTube's own video page: its player over the whole window, everything else hidden
+  const PAGE_CSS = yt ? `
   html.rp-take, html.rp-take body { overflow: hidden !important; background: #000 !important; }
   html.rp-take #movie_player { position: fixed !important; left: 0 !important; top: 0 !important; width: calc(100vw - var(--rp-side, 0px)) !important; height: 100vh !important; z-index: 2147483500 !important; background: #000; }
-  #rp-stage, #rp-msg { display: none !important; }
-  html:not(.rp-take) #rp-chat { display: none !important; }
-  html:not(.rp-take) #rp-bar { top: auto; bottom: 0; right: 0; background: linear-gradient(#0000, #000d); } /* YouTube's own top bar stays usable */
-  ` : `html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }`);
+  ` : ours ? `html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }` : '';
 
-  const HTML = `
-  <div id="rp-stage">
-    <div id="rp-player"></div>
-    <div id="rp-msg">
-      <b id="rp-title">Watch YouTube under the pill</b>
-      <span id="rp-text">Paste a video, live stream, Short or playlist link in the box above. Live streams can show their chat beside or over the video.</span>
-      <button id="rp-btn" hidden></button>
-    </div>
-  </div>
-  <iframe id="rp-chat" title="Live chat"></iframe>
-  <div id="rp-toast"></div>
-  <div id="rp-bar">
-    <input id="rp-url" placeholder="Paste a YouTube link and press Enter" spellcheck="false">
-    <div id="rp-live">LIVE</div>
-    <button id="rp-browse" title="Browse YouTube: search, your subscriptions, sign in"><span class="i">&#xE80F;</span>Browse</button>
-    <button id="rp-chatBtn" hidden title="Live chat: off, beside the video, or over it"><span class="i">&#xE8BD;</span><span id="rp-chatTxt">Chat</span></button>
-    <button id="rp-alpha" title="See-through: click to cycle"><span class="i">&#xE706;</span><span id="rp-alphaTxt">100%</span></button>
-    <button id="rp-ghost" title="Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Ctrl+Alt+G turns it on and off from anywhere; or hold Ctrl over it to use it."><span class="i">&#xE890;</span>Ghost</button>
-    <button id="rp-hide" title="Hide (Ctrl+Alt+Y brings it back; the sound keeps playing)"><span class="i">&#xE921;</span></button>
-    <button id="rp-close" title="Close the video"><span class="i">&#xE8BB;</span></button>
-  </div>
-  ${[10, 11, 12, 15, 13, 14, 16, 17].map(n => `<div class="e" id="rp-e${n}"></div>`).join('')}`;
+  // tiny DOM builder: h('button', {id: 'x', title: '…'}, 'text', child…) — no HTML strings, so no
+  // site's Trusted Types or CSP gets in the way
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'icon') el.append(h('span', { class: 'i' }, v));
+      else if (v !== false) el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const k of kids) if (k != null) el.append(k);
+    if (attrs && attrs.id) ui[attrs.id] = el;
+    return el;
+  }
+  const sheet = css => { const s = new CSSStyleSheet(); s.replaceSync(css); return s; }; // CSP doesn't apply to these
 
   function show(title, text, btn, action) {
     root.classList.remove('empty');
     root.classList.add('err');
-    $('title').textContent = title;
-    $('text').textContent = text;
-    $('btn').hidden = !btn;
-    $('btn').textContent = btn || '';
-    $('btn').onclick = action || null;
+    ui.title.textContent = title;
+    ui.text.textContent = text;
+    ui.btn.hidden = !btn;
+    ui.btn.textContent = btn || '';
+    ui.btn.onclick = action || null;
+  }
+
+  function clearStage() {
+    if (player && player.destroy) { try { player.destroy(); } catch (e) {} }
+    player = null;
+    [...ui.stage.children].forEach(c => c !== ui.msg && c.remove());
   }
 
   function play(t) {
     cur = t;
     live = false;
     root.classList.remove('empty', 'err');
+    if (t.kind === 'tw') {
+      clearStage();
+      const src = t.clip ? 'https://clips.twitch.tv/embed?clip=' + t.clip : 'https://player.twitch.tv/?' + (t.video ? 'video=v' + t.video : 'channel=' + t.channel);
+      ui.stage.prepend(h('iframe', { src: src + '&parent=' + HOST + '&autoplay=true&muted=false', allow: 'autoplay; fullscreen; encrypted-media', allowfullscreen: true }));
+      live = !!t.channel; // a channel is live (or about to be): its chat is worth showing
+      return refresh();
+    }
     refresh();
     if (!apiReady) { pending = t; return; }
-    if (player) { try { player.destroy(); } catch (e) {} }
-    const host = document.createElement('div');
-    host.id = 'rp-player';
-    $('stage').prepend(host);
+    clearStage();
+    const host = h('div', { id: 'ytplayer' });
+    ui.stage.prepend(host);
     const vars = { autoplay: 1, playsinline: 1, rel: 0, origin: location.origin };
     if (t.start) vars.start = t.start;
     if (t.list) { vars.list = t.list; vars.listType = 'playlist'; }
     if (t.channel) vars.channel = t.channel;
-    player = new YT.Player('rp-player', {
+    player = new YT.Player(host, {
       host: 'https://www.youtube.com',
       videoId: t.channel ? 'live_stream' : (t.id || undefined),
       playerVars: vars,
@@ -135,14 +133,13 @@
   const videoId = () => data().video_id || (cur && cur.id) || '';
 
   function check() {
-    if (yt) {
-      if (location.pathname !== path) {
-        path = location.pathname;
-        layout();
-      }
-      player = document.getElementById('movie_player');
+    if (location.pathname !== path) {
+      path = location.pathname;
+      layout();
     }
-    live = takeover() || !yt ? !!data().isLive : false;
+    if (yt) player = document.getElementById('movie_player');
+    if (!ui.url.matches(':focus') && !ours) ui.url.value = location.href;
+    if (!(cur && cur.kind === 'tw')) live = playerPage() ? !!data().isLive : false;
     refresh();
   }
 
@@ -153,8 +150,8 @@
       setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
     }
     if (!root) return;
-    // already browsing everywhere else on YouTube
-    $('browse').hidden = yt && !take;
+    root.classList.toggle('browse', !playerPage());
+    ui.back.hidden = ours;
   }
 
   function onError(code) {
@@ -171,33 +168,36 @@
     else show('YouTube could not play this', 'Error ' + code + '. Try another link.', id && 'Open on YouTube', open);
   }
 
-  // chat only exists for live streams; the pill widens the window while it sits beside the video
+  // live chat (YouTube live streams, Twitch channels); the pill widens the window while it sits beside the video
   function refresh() {
-    const id = videoId();
-    const mode = live && id ? chat : 0;
-    root.classList.toggle('live', live);
+    const tw = cur && cur.kind === 'tw' && ours;
+    const id = tw ? cur.channel : videoId();
+    const mode = live && id && playerPage() ? chat : 0;
+    root.classList.toggle('live', live && playerPage());
     root.classList.toggle('side', mode == 1);
     root.classList.toggle('over', mode == 2);
-    $('chatBtn').hidden = !live;
-    $('chatBtn').classList.toggle('on', chat > 0);
-    $('chatTxt').textContent = ['Chat off', 'Chat beside', 'Chat over'][chat];
-    const src = mode ? 'https://www.youtube.com/live_chat?v=' + id + '&embed_domain=' + location.hostname + '&dark_theme=1' : 'about:blank';
-    if ($('chat').dataset.src !== src) { $('chat').dataset.src = src; $('chat').src = src; }
+    ui.chatBtn.hidden = !(live && playerPage());
+    ui.chatBtn.classList.toggle('on', chat > 0);
+    ui.chatTxt.textContent = ['Chat off', 'Chat beside', 'Chat over'][chat];
+    const src = !mode ? 'about:blank'
+      : tw ? 'https://www.twitch.tv/embed/' + id + '/chat?parent=' + HOST + '&darkpopout'
+      : 'https://www.youtube.com/live_chat?v=' + id + '&embed_domain=' + location.hostname + '&dark_theme=1';
+    if (ui.chat.dataset.src !== src) { ui.chat.dataset.src = src; ui.chat.src = src; }
     const side = mode == 1 ? 1 : 0;
     root.style.setProperty('--side', side ? '300px' : '0px');
     document.documentElement.style.setProperty('--rp-side', side ? '300px' : '0px');
     if (side !== sideSent) {
       sideSent = side;
       post('side:' + side);
-      if (yt) setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
+      if (yt) setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
     }
   }
 
   function toast(text) {
-    $('toast').textContent = text;
-    $('toast').classList.add('on');
+    ui.toast.textContent = text;
+    ui.toast.classList.add('on');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => $('toast').classList.remove('on'), 4000);
+    toastTimer = setTimeout(() => ui.toast.classList.remove('on'), 4000);
   }
 
   function showBar(on) {
@@ -205,71 +205,91 @@
     if (on) {
       root.classList.add('ui');
       hideTimer = setTimeout(() => showBar(false), 2200);
-    } else if (document.activeElement !== $('url')) {
+    } else if (!ui.url.matches(':focus')) {
       root.classList.remove('ui');
     }
   }
 
   function build() {
-    if (document.getElementById('rp')) return;
-    const style = document.createElement('style');
-    style.textContent = CSS;
-    (document.head || document.documentElement).append(style);
-    root = document.createElement('div');
-    root.id = 'rp';
-    // YouTube's page only takes HTML through a Trusted Types policy (ours is the fixed markup above)
-    const tt = window.trustedTypes && window.trustedTypes.createPolicy('resourcepill', { createHTML: s => s });
-    root.innerHTML = tt ? tt.createHTML(HTML) : HTML;
-    document.body.append(root);
-    if (!yt) root.classList.add('empty');
+    if (root) return;
+    const host = document.createElement('resourcepill-ui');
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.adoptedStyleSheets = [sheet(CSS)];
+    if (PAGE_CSS) document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet(PAGE_CSS)];
+
+    const tile = (label, link) => h('button', { title: link }, label);
+    root = h('div', { id: 'rp' },
+      ours ? h('div', { id: 'stage' },
+        h('div', { id: 'msg' },
+          h('b', { id: 'title' }, 'Watch and browse under the pill'),
+          h('span', { id: 'text' }, 'Paste a YouTube or Twitch link to watch it here, with live chat beside or over it. Or type any address or search: sign in to sites and they stay signed in.'),
+          h('div', { id: 'tiles' }, tile('YouTube', 'youtube.com'), tile('Twitch', 'twitch.tv'), tile('Google', 'google.com')),
+          h('button', { id: 'btn', hidden: true }))) : null,
+      h('iframe', { id: 'chat', title: 'Live chat', allow: 'clipboard-write' }),
+      h('div', { id: 'toast' }),
+      h('div', { id: 'bar' },
+        h('button', { id: 'back', title: 'Back', icon: '' }),
+        h('input', { id: 'url', placeholder: 'Paste a link, type an address or search', spellcheck: 'false' }),
+        h('div', { id: 'live' }, 'LIVE'),
+        h('button', { id: 'chatBtn', hidden: true, title: 'Live chat: off, beside the video, or over it', icon: '' }, h('span', { id: 'chatTxt' }, 'Chat')),
+        h('button', { id: 'alpha', title: 'See-through: click to cycle', icon: '' }, h('span', { id: 'alphaTxt' }, '100%')),
+        h('button', { id: 'ghost', title: "Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Ctrl+Alt+G turns it on and off from anywhere; or hold Ctrl over it to use it.", icon: '' }, 'Ghost'),
+        h('button', { id: 'hide', title: 'Hide (Ctrl+Alt+Y brings it back; the sound keeps playing)', icon: '' }),
+        h('button', { id: 'close', title: 'Close', icon: '' })),
+      ...[10, 11, 12, 15, 13, 14, 16, 17].map(n => h('div', { class: 'e', id: 'e' + n })));
+    shadow.append(root);
+    document.documentElement.append(host); // outside <body>: some sites replace it
+    if (ours) root.classList.add('empty');
     layout();
 
     window.chrome.webview.addEventListener('message', e => {
       const m = e.data;
-      if (m.play && !yt) { $('url').blur(); play(m.play); }
-      if (m.err) show("That isn't a YouTube link", m.err);
+      if (m.play && ours) { ui.url.blur(); play(m.play); }
+      if (m.err) show("Couldn't open that", m.err);
       if (m.state) {
         chat = m.state.chat;
-        $('alphaTxt').textContent = m.state.alpha + '%';
-        $('alpha').classList.toggle('on', m.state.alpha < 100);
-        $('ghost').classList.toggle('on', m.state.ghost);
-        if (m.state.ghost && ghost !== true) toast('Ghost on: clicks go through. Ctrl+Alt+G turns it off (or hold Ctrl over the video).');
+        ui.alphaTxt.textContent = m.state.alpha + '%';
+        ui.alpha.classList.toggle('on', m.state.alpha < 100);
+        ui.ghost.classList.toggle('on', m.state.ghost);
+        if (m.state.ghost && ghost !== true) toast('Ghost on: clicks go through. Ctrl+Alt+G turns it off (or hold Ctrl over the window).');
         ghost = m.state.ghost;
         refresh();
       }
       if ('hover' in m) m.hover ? showBar(true) : setTimeout(() => showBar(false), 400);
     });
 
-    const url = $('url');
+    const url = ui.url;
     const open = () => { if (url.value.trim()) post('open:' + url.value.trim()); };
     url.addEventListener('keydown', e => {
-      e.stopPropagation(); // not YouTube's keyboard shortcuts
+      e.stopPropagation(); // not the site's keyboard shortcuts
       if (e.key === 'Enter') open();
       if (e.key === 'Escape') url.blur();
     });
-    url.addEventListener('paste', () => setTimeout(open, 0));
+    url.addEventListener('keyup', e => e.stopPropagation());
+    url.addEventListener('paste', () => setTimeout(() => { if (ours) open(); }, 0)); // on the start page a pasted link opens at once
     url.addEventListener('focus', () => url.select());
     url.addEventListener('blur', () => showBar(true));
-    $('chatBtn').onclick = () => post('chat:' + (chat + 1) % 3);
-    $('alpha').onclick = () => post('alpha');
-    $('ghost').onclick = () => post('ghost');
-    $('hide').onclick = () => post('hide');
-    $('close').onclick = () => post('close');
-    $('browse').onclick = () => { location.href = 'https://www.youtube.com/'; };
+    if (ours) root.querySelectorAll('#tiles button').forEach(b => { b.onclick = () => post('open:' + b.title); });
+    ui.back.onclick = () => history.back();
+    ui.chatBtn.onclick = () => post('chat:' + (chat + 1) % 3);
+    ui.alpha.onclick = () => post('alpha');
+    ui.ghost.onclick = () => post('ghost');
+    ui.hide.onclick = () => post('hide');
+    ui.close.onclick = () => post('close');
     root.querySelectorAll('.e').forEach(el => el.addEventListener('mousedown', e => {
-      if (e.button === 0) { e.preventDefault(); post('size:' + el.id.slice(4)); }
+      if (e.button === 0) { e.preventDefault(); post('size:' + el.id.slice(1)); }
     }));
 
-    if (!yt) {
+    if (ours) {
       window.onYouTubeIframeAPIReady = () => { apiReady = true; if (pending) { const t = pending; pending = null; play(t); } };
       const tag = document.createElement('script');
       tag.src = 'https://www.youtube.com/iframe_api';
-      tag.onerror = () => show('Could not reach YouTube', 'Check your internet connection, then paste the link again.');
       document.head.append(tag);
     }
-    setInterval(check, 1500); // live or not (and, on YouTube's page, the video it moved on to)
-    if (yt) window.addEventListener('yt-navigate-finish', check); // YouTube changes pages without reloading
-    post(yt ? 'ready:youtube' : 'ready:embed');
+    setInterval(check, 1500); // live or not, and where a site moved on to without reloading
+    if (yt) window.addEventListener('yt-navigate-finish', check);
+    check();
+    post(ours ? 'ready:embed' : 'ready:site');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build);
