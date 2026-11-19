@@ -11,7 +11,7 @@
   const yt = location.hostname === 'www.youtube.com';
   if (window.top !== window || !window.chrome || !window.chrome.webview || !(yt || location.hostname === HOST)) return;
   const post = s => window.chrome.webview.postMessage(s);
-  let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root;
+  let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root, ghost = null, toastTimer = 0;
   let path = location.pathname;
   const takeover = () => yt && location.pathname === '/watch'; // a video on YouTube's page fills the window
   const $ = id => root.querySelector('#rp-' + id);
@@ -42,6 +42,8 @@
   #rp-msg b { font-size: 15px; font-weight: 600; }
   #rp-msg span { opacity: .62; max-width: 440px; line-height: 1.45; }
   #rp-msg button { margin-top: 6px; }
+  #rp-toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 90%; padding: 8px 14px; border-radius: 16px; background: #000c; font-size: 12.5px; text-align: center; opacity: 0; transition: opacity .25s; pointer-events: none !important; }
+  #rp-toast.on { opacity: 1; }
   #rp .e { position: absolute; }
   #rp-e10 { left: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
   #rp-e11 { right: 0; top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
@@ -69,6 +71,7 @@
     </div>
   </div>
   <iframe id="rp-chat" title="Live chat"></iframe>
+  <div id="rp-toast"></div>
   <div id="rp-bar">
     <input id="rp-url" placeholder="Paste a YouTube link and press Enter" spellcheck="false">
     <div id="rp-live">LIVE</div>
@@ -177,6 +180,13 @@
     }
   }
 
+  function toast(text) {
+    $('toast').textContent = text;
+    $('toast').classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => $('toast').classList.remove('on'), 4000);
+  }
+
   function showBar(on) {
     clearTimeout(hideTimer);
     if (on) {
@@ -210,6 +220,8 @@
         $('alphaTxt').textContent = m.state.alpha + '%';
         $('alpha').classList.toggle('on', m.state.alpha < 100);
         $('ghost').classList.toggle('on', m.state.ghost);
+        if (m.state.ghost && ghost !== true) toast('Ghost on: clicks go through. Ctrl+Alt+G turns it off (or hold Ctrl over the video).');
+        ghost = m.state.ghost;
         refresh();
       }
       if ('hover' in m) m.hover ? showBar(true) : setTimeout(() => showBar(false), 400);
