@@ -18,6 +18,7 @@ mod keyboard;
 mod bundle;
 mod setup;
 mod update;
+mod video;
 #[allow(dead_code)] // download fields are used by the helper
 mod catalog;
 
@@ -106,6 +107,7 @@ const HOTKEY: i32 = 1;
 const HOTKEY_REC: i32 = 2; // Ctrl+Alt+R
 const HOTKEY_EXPLAIN: i32 = 3; // Ctrl+Alt+E
 const HOTKEY_MIXER: i32 = 4; // Ctrl+Alt+V
+const HOTKEY_VIDEO: i32 = 5; // Ctrl+Alt+Y
 const CLASS: PCWSTR = w!("ResourcePill.Window");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: PCWSTR = w!("ResourcePill");
@@ -183,12 +185,17 @@ struct Settings {
     keep_audio: bool,
     gpu: bool, // run the accurate pass on the NVIDIA GPU (downloads the GPU speech engine)
     gpu_asked: bool, // asked once whether to use the GPU (no nagging after)
+    video_url: String, // last YouTube link played under the pill
+    video_w: u32, // its width in DIPs (0: as wide as the pill)
+    video_alpha: usize, // index into video::ALPHAS
+    video_chat: usize, // live chat: 0 off, 1 beside the video, 2 over it
+    video_ghost: bool, // clicks go through the video
     pos: Option<(i32, i32)>, // pill top-left, physical px
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, gpu: false, gpu_asked: false, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, gpu: false, gpu_asked: false, video_url: String::new(), video_w: 0, video_alpha: 0, video_chat: 1, video_ghost: false, pos: None }
     }
 }
 
@@ -240,6 +247,11 @@ impl Settings {
                 "auto_hide" => s.auto_hide = v == "1",
                 "gpu" => s.gpu = v == "1",
                 "gpu_asked" => s.gpu_asked = v == "1",
+                "video_url" => s.video_url = v.to_string(),
+                "video_w" => s.video_w = n.filter(|&n| (0..=10_000).contains(&n)).unwrap_or(0) as u32,
+                "video_alpha" => s.video_alpha = idx(video::ALPHAS.len()).unwrap_or(0),
+                "video_chat" => s.video_chat = idx(video::CHATS.len()).unwrap_or(1),
+                "video_ghost" => s.video_ghost = v == "1",
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
                         s.shown[i] = c == '1';
@@ -266,8 +278,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\ngpu={}\ngpu_asked={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), b(self.gpu), b(self.gpu_asked), shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\ngpu={}\ngpu_asked={}\nvideo_url={}\nvideo_w={}\nvideo_alpha={}\nvideo_chat={}\nvideo_ghost={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), b(self.gpu), b(self.gpu_asked), self.video_url.replace(['\r', '\n'], ""), self.video_w, self.video_alpha, self.video_chat, b(self.video_ghost), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -645,6 +657,7 @@ struct App {
     setup_current: Option<&'static str>, // the one downloading now
     record_when_ready: bool, // record was pressed while getting ready
     updating: Option<update::Release>, // the update being downloaded
+    video: Option<video::Video>, // YouTube under the pill (while open)
 
     // dragging: cursor offset inside the pill as a fraction, so it survives orientation changes
     press: Option<(POINT, (f32, f32))>,
@@ -803,6 +816,7 @@ impl App {
                 setup_current: None,
                 record_when_ready: false,
                 updating: None,
+                video: None,
                 press: None,
                 dragging: false,
                 vol_drag: false,
@@ -828,6 +842,7 @@ impl App {
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_REC, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_EXPLAIN, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'E' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_MIXER, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'V' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_VIDEO, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Y' as u32);
             SetTimer(Some(self.hwnd), TIMER_BLINK, 3000, None);
             self.sync_edge_timer();
             self.vram_total = recorder::vram_total();
@@ -1190,8 +1205,9 @@ impl App {
                         }
                     }
                     if self.want_visible {
-                        if !self.menu_open {
+                        if !self.menu_open && !self.video_full() {
                             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                            self.video_raise();
                         }
                         // Full animations: rings and bars glide to the new values (~0.3 s), then the timer stops.
                         // Reduced: one frame per data tick, the lowest possible CPU.
@@ -1240,6 +1256,9 @@ impl App {
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_REC => self.toggle_record(),
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_EXPLAIN => self.explain_now(), // highlight, then press
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_MIXER => self.toggle_mixer(),
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_VIDEO => self.video_hotkey(),
+                video::WM_APP_VIDEO => self.video_inbox(),
+                WM_TIMER if wp.0 == video::TIMER_VIDEO => self.video_tick(),
                 WM_MOUSEWHEEL if self.settings.is_none() => {
                     let notches = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
                     // over the music cell or the player: volume
@@ -2162,6 +2181,7 @@ impl App {
                 return false;
             }
             self.present(&lay, pw, ph);
+            self.video_follow(&lay);
             moving_only
         }
     }
@@ -3083,6 +3103,12 @@ impl App {
                 self.start_update();
                 return;
             }
+            1600 if self.video_is_open() => self.video_close(),
+            1600 => self.video_open(),
+            1601 => self.video_hotkey(),
+            1610..=1619 if id - 1610 < video::ALPHAS.len() => self.video_set_alpha(id - 1610),
+            1620..=1622 => self.video_set_chat(id - 1620),
+            1630 => self.video_set_ghost(!self.cfg.video_ghost),
             1310..=1312 => self.cfg.explain = id as usize - 1310,
             1320 => {
                 let key = extras::clipboard_text(self.hwnd).unwrap_or_default().trim().to_string();
@@ -3224,6 +3250,7 @@ impl App {
                 self.rec.stop();
             }
             self.end_explain_mode(); // normal cursors back, hook removed
+            self.video_close();
             self.duck.stop.store(true, Ordering::Relaxed); // music back to your volume before exiting
             if let Some(t) = self.duck_thread.take() {
                 let _ = t.join();
@@ -3422,7 +3449,7 @@ mod tests {
     #[test]
     fn settings_roundtrip_and_garbage() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, gpu: true, gpu_asked: true, pos: Some((-100, 50)) };
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, gpu: true, gpu_asked: true, video_url: "https://youtu.be/dQw4w9WgXcQ?t=5".into(), video_w: 640, video_alpha: 2, video_chat: 2, video_ghost: true, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
@@ -3433,6 +3460,7 @@ mod tests {
         assert_eq!((l.duck_roles.as_str(), l.art_tint, l.kbd_show), ("chrome=l", false, false));
         assert_eq!(l.rec_dir, "D:/Meetings");
         assert_eq!((l.gpu, l.gpu_asked), (true, true));
+        assert_eq!((l.video_url.as_str(), l.video_w, l.video_alpha, l.video_chat, l.video_ghost), ("https://youtu.be/dQw4w9WgXcQ?t=5", 640, 2, 2, true));
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
         let g = Settings::load();

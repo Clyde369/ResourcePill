@@ -47,7 +47,7 @@ fn item_h(i: &MI) -> f32 {
 
 /// Commands that leave the panel (they open something or change what is on screen).
 fn closes_panel(id: usize) -> bool {
-    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1205 | 1300 | 1499 | 1500) || (600..700).contains(&id) || (1400..1499).contains(&id)
+    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1205 | 1300 | 1499 | 1500 | 1600 | 1601) || (600..700).contains(&id) || (1400..1499).contains(&id)
 }
 
 impl App {
@@ -187,6 +187,22 @@ impl App {
             act_r(1201, if recording { "Stop recording" } else { "Record & transcribe" }, "Ctrl+Alt+R", false),
             act(1204, "Recordings", false),
             act_r(1300, "Explain highlighted text", "Ctrl+Alt+E", false),
+            {
+                let open = self.video_is_open();
+                let alphas: Vec<String> = video::ALPHAS.iter().map(|a| if *a == 100 { "Solid".into() } else { format!("{a}%") }).collect();
+                let mut items = vec![act_r(1600, if open { "Close the video" } else { "Open (paste a link in it)" }, if open { "" } else { "Ctrl+Alt+Y" }, false)];
+                if open {
+                    items.push(act_r(1601, if self.video_hidden() { "Show it again" } else { "Hide (sound keeps playing)" }, "Ctrl+Alt+Y", false));
+                }
+                items.extend([
+                    MI::Sep,
+                    sub("See-through", &alphas[cfg.video_alpha.min(alphas.len() - 1)], pick(1610, &alphas.iter().map(|s| s.as_str()).collect::<Vec<_>>(), cfg.video_alpha)),
+                    sub("Live chat", video::CHATS[cfg.video_chat.min(2)], pick(1620, &video::CHATS, cfg.video_chat)),
+                    act_r(1630, "Ghost: clicks go through it", "fades under the mouse · hold Ctrl to use it", cfg.video_ghost),
+                    MI::Head("Resize it by dragging its edges".into()),
+                ]);
+                sub("YouTube under the pill", if !open { "" } else if self.video_hidden() { "hidden" } else { "open" }, items)
+            },
             MI::Sep,
             appearance,
             sub("Transcription", asr_short, tx),
