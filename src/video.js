@@ -9,7 +9,20 @@
 (() => {
   const HOST = '%HOST%';
   const yt = location.hostname === 'www.youtube.com';
-  if (window.top !== window || !window.chrome || !window.chrome.webview || !(yt || location.hostname === HOST)) return;
+  if (window.top !== window || !window.chrome || !window.chrome.webview) return;
+  // Google's sign-in pages (and the "secure your account" ones after it): just a way back
+  if (location.hostname === 'google.com' || location.hostname.endsWith('.google.com')) {
+    const back = () => {
+      const b = document.createElement('button');
+      b.textContent = '← Back to YouTube';
+      b.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483647;padding:8px 14px;border:0;border-radius:16px;background:#202124;color:#fff;font:13px "Segoe UI",sans-serif;cursor:pointer;box-shadow:0 2px 10px #0006';
+      b.onclick = () => { location.href = 'https://www.youtube.com/'; };
+      document.body.append(b);
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', back); else back();
+    return;
+  }
+  if (!(yt || location.hostname === HOST)) return;
   const post = s => window.chrome.webview.postMessage(s);
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root, ghost = null, toastTimer = 0;
   let path = location.pathname;
