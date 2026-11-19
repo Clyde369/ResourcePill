@@ -274,7 +274,7 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
                 args.Uri(&mut p)?;
                 let uri = take_pwstr(p);
                 let h = host(&uri);
-                let ok = h == HOST || is_youtube(&h) || h == "google.com" || h.ends_with(".google.com") || h.starts_with("accounts.google.") || uri == "about:blank";
+                let ok = h == HOST || is_youtube(&h) || h == "google.com" || h.ends_with(".google.com") || uri == "about:blank";
                 if !ok {
                     args.SetCancel(true)?;
                     if uri.starts_with("https://") {
