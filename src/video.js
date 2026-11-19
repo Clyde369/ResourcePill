@@ -17,6 +17,9 @@
   // every message carries this session's token (only this script has it), so a site can't drive the window itself
   const pm = window.chrome.webview.postMessage.bind(window.chrome.webview);
   const post = s => pm('%TOKEN%|' + s);
+  // the browser's own versions, taken before any page script runs (a page can't swap them to reach into the bar)
+  const attachShadow = Element.prototype.attachShadow;
+  const real = fn => e => { if (e && e.isTrusted) fn(e); }; // only real clicks and keys, never a page script's .click()
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, ghost = null, toastTimer = 0;
   let root, ui = {}, path = location.pathname;
   const takeover = () => yt && location.pathname === '/watch'; // a video on YouTube's page fills the window
@@ -92,7 +95,7 @@
     ui.text.textContent = text;
     ui.btn.hidden = !btn;
     ui.btn.textContent = btn || '';
-    ui.btn.onclick = action || null;
+    ui.btn.onclick = action ? real(action) : null;
   }
 
   function clearStage() {
@@ -215,7 +218,7 @@
   function build() {
     if (root) return;
     const host = document.createElement('resourcepill-ui');
-    const shadow = host.attachShadow({ mode: 'closed' });
+    const shadow = attachShadow.call(host, { mode: 'closed' });
     shadow.adoptedStyleSheets = [sheet(CSS)];
     if (PAGE_CSS) document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet(PAGE_CSS)];
 
@@ -262,25 +265,25 @@
 
     const url = ui.url;
     const open = () => { if (url.value.trim()) post('open:' + url.value.trim()); };
-    url.addEventListener('keydown', e => {
+    url.addEventListener('keydown', real(e => {
       e.stopPropagation(); // not the site's keyboard shortcuts
       if (e.key === 'Enter') open();
       if (e.key === 'Escape') url.blur();
-    });
+    }));
     url.addEventListener('keyup', e => e.stopPropagation());
-    url.addEventListener('paste', () => setTimeout(() => { if (ours) open(); }, 0)); // on the start page a pasted link opens at once
+    url.addEventListener('paste', real(() => setTimeout(() => { if (ours) open(); }, 0))); // on the start page a pasted link opens at once
     url.addEventListener('focus', () => url.select());
     url.addEventListener('blur', () => showBar(true));
-    if (ours) root.querySelectorAll('#tiles button').forEach(b => { b.onclick = () => post('open:' + b.title); });
-    ui.back.onclick = () => history.back();
-    ui.chatBtn.onclick = () => post('chat:' + (chat + 1) % 3);
-    ui.alpha.onclick = () => post('alpha');
-    ui.ghost.onclick = () => post('ghost');
-    ui.hide.onclick = () => post('hide');
-    ui.close.onclick = () => post('close');
-    root.querySelectorAll('.e').forEach(el => el.addEventListener('mousedown', e => {
+    if (ours) root.querySelectorAll('#tiles button').forEach(b => { b.onclick = real(() => post('open:' + b.title)); });
+    ui.back.onclick = real(() => history.back());
+    ui.chatBtn.onclick = real(() => post('chat:' + (chat + 1) % 3));
+    ui.alpha.onclick = real(() => post('alpha'));
+    ui.ghost.onclick = real(() => post('ghost'));
+    ui.hide.onclick = real(() => post('hide'));
+    ui.close.onclick = real(() => post('close'));
+    root.querySelectorAll('.e').forEach(el => el.addEventListener('mousedown', real(e => {
       if (e.button === 0) { e.preventDefault(); post('size:' + el.id.slice(1)); }
-    }));
+    })));
 
     if (ours) {
       window.onYouTubeIframeAPIReady = () => { apiReady = true; if (pending) { const t = pending; pending = null; play(t); } };
