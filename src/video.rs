@@ -216,7 +216,10 @@ unsafe fn start_webview(hwnd: HWND) -> windows::core::Result<()> {
     let _ = std::fs::create_dir_all(&page_dir);
     std::fs::write(page_dir.join("player.html"), PAGE).map_err(|_| windows::core::Error::from(E_FAIL))?;
     let opts = CoreWebView2EnvironmentOptions::default();
-    unsafe { opts.set_additional_browser_arguments("--autoplay-policy=no-user-gesture-required".into()) };
+    unsafe {
+        opts.set_additional_browser_arguments("--autoplay-policy=no-user-gesture-required".into());
+        opts.set_are_browser_extensions_enabled(true); // ad blockers etc. (see load_extensions)
+    }
     let env_done = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |hr, env| {
         let env = hr.and(env.ok_or(windows::core::Error::from(E_POINTER)));
         let env = match env {
@@ -233,6 +236,34 @@ unsafe fn start_webview(hwnd: HWND) -> windows::core::Result<()> {
     }));
     let opts: ICoreWebView2EnvironmentOptions = opts.into();
     unsafe { CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &HSTRING::from(dir.join("WebView2").as_os_str()), &opts, &env_done) }
+}
+
+/// Unpacked browser extensions for the YouTube window (e.g. an ad blocker): every folder with a
+/// manifest.json in %LOCALAPPDATA%\ResourcePill\extensions.
+fn extension_dirs() -> Vec<std::path::PathBuf> {
+    let Some(dir) = data_dir().map(|d| d.join("extensions")) else { return Vec::new() };
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.join("manifest.json").is_file()).collect()
+}
+
+/// Add the extensions one by one (re-adding updates them), then open the page, so ads are blocked from the first video.
+fn load_extensions(wv: ICoreWebView2, mut dirs: Vec<std::path::PathBuf>) {
+    let Some(dir) = dirs.pop() else {
+        navigate(&format!("https://{HOST}/player.html"));
+        return;
+    };
+    let profile = unsafe { wv.cast::<ICoreWebView2_13>().and_then(|w| w.Profile()).and_then(|p| p.cast::<ICoreWebView2Profile7>()) };
+    let Ok(profile) = profile else {
+        return load_extensions(wv, Vec::new()); // runtime too old for extensions: just play
+    };
+    let next = wv.clone();
+    let done = ProfileAddBrowserExtensionCompletedHandler::create(Box::new(move |_, _| {
+        load_extensions(next, dirs); // a broken extension is skipped
+        Ok(())
+    }));
+    if unsafe { profile.AddBrowserExtension(&HSTRING::from(dir.as_os_str()), &done) }.is_err() {
+        load_extensions(wv, Vec::new());
+    }
 }
 
 fn inbox_fail(e: windows::core::Error) -> windows::core::Result<()> {
@@ -330,12 +361,13 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
         WV.with(|w| *w.borrow_mut() = Some((ctl, wv.clone())));
         // the bar, chat and player logic go into every page (video.js only acts on ours and YouTube's watch page)
         let ui = HSTRING::from(UI.replace("%HOST%", HOST));
-        let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|hr, _| {
+        let ui_target = wv.clone();
+        let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, _| {
             hr?;
-            navigate(&format!("https://{HOST}/player.html"));
+            load_extensions(wv.clone(), extension_dirs());
             Ok(())
         }));
-        wv.AddScriptToExecuteOnDocumentCreated(&ui, &added)
+        ui_target.AddScriptToExecuteOnDocumentCreated(&ui, &added)
     }
 }
 

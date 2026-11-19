@@ -108,6 +108,7 @@ const HOTKEY_REC: i32 = 2; // Ctrl+Alt+R
 const HOTKEY_EXPLAIN: i32 = 3; // Ctrl+Alt+E
 const HOTKEY_MIXER: i32 = 4; // Ctrl+Alt+V
 const HOTKEY_VIDEO: i32 = 5; // Ctrl+Alt+Y
+const HOTKEY_GHOST: i32 = 6; // Ctrl+Alt+G
 const CLASS: PCWSTR = w!("ResourcePill.Window");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: PCWSTR = w!("ResourcePill");
@@ -843,6 +844,7 @@ impl App {
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_EXPLAIN, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'E' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_MIXER, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'V' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_VIDEO, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Y' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_GHOST, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'G' as u32);
             SetTimer(Some(self.hwnd), TIMER_BLINK, 3000, None);
             self.sync_edge_timer();
             self.vram_total = recorder::vram_total();
@@ -1257,6 +1259,7 @@ impl App {
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_EXPLAIN => self.explain_now(), // highlight, then press
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_MIXER => self.toggle_mixer(),
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_VIDEO => self.video_hotkey(),
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_GHOST => self.video_set_ghost(!self.cfg.video_ghost), // the way out of ghost from anywhere
                 video::WM_APP_VIDEO => self.video_inbox(),
                 WM_TIMER if wp.0 == video::TIMER_VIDEO => self.video_tick(),
                 WM_MOUSEWHEEL if self.settings.is_none() => {

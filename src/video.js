@@ -75,7 +75,7 @@
     <button id="rp-browse" title="Browse YouTube: search, your subscriptions, sign in"><span class="i">&#xE80F;</span>Browse</button>
     <button id="rp-chatBtn" hidden title="Live chat: off, beside the video, or over it"><span class="i">&#xE8BD;</span><span id="rp-chatTxt">Chat</span></button>
     <button id="rp-alpha" title="See-through: click to cycle"><span class="i">&#xE706;</span><span id="rp-alphaTxt">100%</span></button>
-    <button id="rp-ghost" title="Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Hold Ctrl to use it again."><span class="i">&#xE890;</span>Ghost</button>
+    <button id="rp-ghost" title="Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Ctrl+Alt+G turns it on and off from anywhere; or hold Ctrl over it to use it."><span class="i">&#xE890;</span>Ghost</button>
     <button id="rp-hide" title="Hide (Ctrl+Alt+Y brings it back; the sound keeps playing)"><span class="i">&#xE921;</span></button>
     <button id="rp-close" title="Close the video"><span class="i">&#xE8BB;</span></button>
   </div>

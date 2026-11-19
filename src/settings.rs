@@ -198,7 +198,7 @@ impl App {
                     MI::Sep,
                     sub("See-through", &alphas[cfg.video_alpha.min(alphas.len() - 1)], pick(1610, &alphas.iter().map(|s| s.as_str()).collect::<Vec<_>>(), cfg.video_alpha)),
                     sub("Live chat", video::CHATS[cfg.video_chat.min(2)], pick(1620, &video::CHATS, cfg.video_chat)),
-                    act_r(1630, "Ghost: clicks go through it", "fades under the mouse · hold Ctrl to use it", cfg.video_ghost),
+                    act_r(1630, "Ghost: clicks go through it", "Ctrl+Alt+G on/off · or hold Ctrl over it", cfg.video_ghost),
                     MI::Head("Resize it by dragging its edges".into()),
                 ]);
                 sub("YouTube under the pill", if !open { "" } else if self.video_hidden() { "hidden" } else { "open" }, items)
