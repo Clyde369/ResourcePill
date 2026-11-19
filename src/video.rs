@@ -340,6 +340,23 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
             &mut token,
         )?;
         // links out of the player (title, logo, channel) go to your browser; Google sign-in (to chat) stays here
+        // a crashed page reloads; if the whole browser went down, the pill starts the window again
+        wv.add_ProcessFailed(
+            &ProcessFailedEventHandler::create(Box::new(move |wv, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                args.ProcessFailedKind(&mut kind)?;
+                if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
+                    send("crashed".into());
+                } else if [COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED, COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED].contains(&kind) {
+                    if let Some(wv) = wv {
+                        wv.Reload()?;
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
         wv.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -651,6 +668,23 @@ impl App {
                 "ext" if val.starts_with("https://www.youtube.com/") => unsafe {
                     ShellExecuteW(None, w!("open"), &HSTRING::from(val), None, None, SW_SHOWNORMAL);
                 },
+                // the browser behind the window went down: start it again (once a minute at most, so a crash loop can't spin)
+                "crashed" if self.video.is_some() => {
+                    thread_local!(static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) });
+                    let again = LAST.with(|l| l.replace(Some(std::time::Instant::now()))).is_some_and(|t| t.elapsed().as_secs() < 60);
+                    let hidden = self.video_hidden();
+                    self.video_close();
+                    if again {
+                        self.job = Some(recorder::Job::note(recorder::JobKind::Explain, "YouTube", "The video window's browser keeps crashing. Open it again with Ctrl+Alt+Y; if it keeps happening, try removing the extensions in %LOCALAPPDATA%\\ResourcePill\\extensions."));
+                        self.after_rec_change();
+                    } else {
+                        self.video_open();
+                        if let Some(v) = &mut self.video {
+                            v.hidden = hidden;
+                        }
+                        self.video_place();
+                    }
+                }
                 "fail" if self.video.is_some() => {
                     self.video_close();
                     let msg = format!("YouTube needs Microsoft Edge WebView2 (built into Windows 11; on Windows 10 install it from Microsoft). {val}");
