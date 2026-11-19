@@ -14,7 +14,9 @@
   if (window.top !== window || !window.chrome || !window.chrome.webview) return;
   const ours = location.hostname === HOST;
   const yt = location.hostname === 'www.youtube.com';
-  const post = s => window.chrome.webview.postMessage(s);
+  // every message carries this session's token (only this script has it), so a site can't drive the window itself
+  const pm = window.chrome.webview.postMessage.bind(window.chrome.webview);
+  const post = s => pm('%TOKEN%|' + s);
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, ghost = null, toastTimer = 0;
   let root, ui = {}, path = location.pathname;
   const takeover = () => yt && location.pathname === '/watch'; // a video on YouTube's page fills the window

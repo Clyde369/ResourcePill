@@ -117,7 +117,8 @@ pub fn classify(text: &str) -> Option<Link> {
     }
     let spaced = t.contains(char::is_whitespace);
     match t.split_once("://").map(|(s, _)| s.to_ascii_lowercase()) {
-        Some(s) if (s == "https" || s == "http") && !spaced => Some(Link::Web(t.to_string())),
+        Some(s) if s == "https" && !spaced => Some(Link::Web(t.to_string())),
+        Some(s) if s == "http" && !spaced => Some(Link::Web(if local(t) { t.to_string() } else { format!("https://{}", &t[7..]) })), // never in the clear
         Some(_) => None,
         None if !spaced && (host(t).contains('.') || host(t) == "localhost") => Some(Link::Web(format!("https://{t}"))),
         None => Some(Link::Web(format!("https://www.google.com/search?q={}", explainui::url_encode(t)))),
@@ -180,6 +181,23 @@ pub fn parse(text: &str) -> Option<Target> {
     let ch_ok = tg.channel.is_empty() || (tg.channel.starts_with("UC") && safe(&tg.channel));
     let any = !(tg.id.is_empty() && tg.list.is_empty() && tg.channel.is_empty());
     (id_ok && ch_ok && safe(&tg.list) && any).then_some(tg)
+}
+
+/// This PC (a local dev server): the only place plain http is allowed.
+fn local(url: &str) -> bool {
+    matches!(host(url).as_str(), "localhost" | "127.0.0.1")
+}
+
+/// A page the window may load: https, or http on this PC only (the pill may run as administrator).
+fn web_ok(url: &str) -> bool {
+    url.starts_with("https://") || (url.starts_with("http://") && local(url))
+}
+
+/// Random per run; the bar's messages carry it so sites can't send their own (std's hasher keys are random).
+fn session_token() -> &'static str {
+    use std::hash::{BuildHasher, Hasher};
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    T.get_or_init(|| (0..2).map(|_| format!("{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish())).collect())
 }
 
 /// Lowercase host of a URL ("" if none).
@@ -369,21 +387,23 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
                 let mut p = PWSTR::null();
                 args.Uri(&mut p)?;
                 let uri = take_pwstr(p);
-                if !(uri.starts_with("https://") || uri.starts_with("http://") || uri == "about:blank") {
+                if !(web_ok(&uri) || uri == "about:blank") {
                     args.SetCancel(true)?;
                 }
                 Ok(())
             })),
             &mut token,
         )?;
-        // the bar runs on every page, so any page can send these; none of them reach beyond this window
-        // (ext: only opens YouTube links in your browser)
+        // only the bar's own messages count: they carry this session's token, which sites never see
         wv.add_WebMessageReceived(
             &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
                 let mut p = PWSTR::null();
                 args.TryGetWebMessageAsString(&mut p)?;
-                let s = take_pwstr(p);
+                let Some(s) = take_pwstr(p).strip_prefix(&format!("{}|", session_token())).map(str::to_string) else { return Ok(()) };
+                if s.starts_with("crashed") || s.starts_with("fail") || s.starts_with("full") {
+                    return Ok(()); // the window's own events, never from a page
+                }
                 // resize from the page's edges: hand the drag to Windows' own sizing loop
                 if let Some(ht) = s.strip_prefix("size:").and_then(|v| v.parse::<usize>().ok()).filter(|h| (10..=17).contains(h)) {
                     let mut c = POINT::default();
@@ -414,20 +434,21 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
             })),
             &mut token,
         )?;
-        // links that open a new tab open here instead; sized pop-ups (sign in with Google/Twitch…) stay pop-ups
+        // links that open a new tab open here instead; sized pop-ups (sign in with Google/Twitch…) stay
+        // pop-ups, but only for web pages
         wv.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
-                let mut sized = BOOL(0);
-                args.WindowFeatures()?.HasSize(&mut sized)?;
-                if sized.as_bool() {
-                    return Ok(());
-                }
                 let mut p = PWSTR::null();
                 args.Uri(&mut p)?;
                 let uri = take_pwstr(p);
+                let mut sized = BOOL(0);
+                args.WindowFeatures()?.HasSize(&mut sized)?;
+                if sized.as_bool() && web_ok(&uri) {
+                    return Ok(());
+                }
                 args.SetHandled(true)?;
-                if uri.starts_with("https://") || uri.starts_with("http://") {
+                if web_ok(&uri) {
                     navigate(&uri);
                 }
                 Ok(())
@@ -437,7 +458,7 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
         let _ = ctl.SetBounds(client(hwnd));
         WV.with(|w| *w.borrow_mut() = Some((ctl, wv.clone())));
         // the bar, chat and player logic go into every page (video.js only acts on ours and YouTube's watch page)
-        let ui = HSTRING::from(UI.replace("%HOST%", HOST));
+        let ui = HSTRING::from(UI.replace("%HOST%", HOST).replace("%TOKEN%", session_token()));
         let ui_target = wv.clone();
         let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, _| {
             hr?;
@@ -820,6 +841,9 @@ mod tests {
         assert_eq!(classify("discord.com/app"), web("https://discord.com/app"));
         assert_eq!(classify(" https://example.com/a?b=c "), web("https://example.com/a?b=c"));
         assert_eq!(classify("http://localhost:3000"), web("http://localhost:3000"));
+        assert_eq!(classify("http://example.com/x"), web("https://example.com/x")); // upgraded, never in the clear
+        assert!(web_ok("https://a.com") && web_ok("http://localhost:8080/") && !web_ok("http://a.com") && !web_ok("file:///C:/"));
+        assert_eq!(session_token().len(), 32);
         assert_eq!(classify("best gta 6 clips"), web("https://www.google.com/search?q=best+gta+6+clips"));
         assert_eq!(classify("twitch.tv"), web("https://twitch.tv"));
         // never: other kinds of links, nothing at all
