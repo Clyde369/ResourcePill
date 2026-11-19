@@ -1,17 +1,20 @@
-// The YouTube window's page (src/video.rs injects it into every page it loads). Two modes:
+// The YouTube window's page (src/video.rs injects it into every page it loads). Two places:
 //  - embed: our own page (https://%HOST%/player.html) with YouTube's embedded player
-//  - watch: youtube.com's own watch page, for videos whose owner turned off embedding; the player
-//    is stretched over the window and everything else hidden
-// Both get the same hover bar, live chat and resize edges. Talks to the pill with short strings:
-//  page → pill: ready:embed|watch, open:<text>, watch:<id>|<list>|<start>, chat:<n>, side:<0|1>,
+//  - youtube.com itself: for browsing (and signing in), and for videos whose owner turned off
+//    embedding. On a watch page the player is stretched over the window and everything else hidden,
+//    unless you pressed Browse to see the whole page; opening another video stretches it again.
+// All get the same hover bar, live chat and resize edges. Talks to the pill with short strings:
+//  page → pill: ready:embed|youtube, open:<text>, watch:<id>|<list>|<start>, chat:<n>, side:<0|1>,
 //               alpha, ghost, hide, close, ext:<url>, size:<hit-test>
 //  pill → page: {play:{id,list,start,channel}}, {state:{chat,alpha,ghost}}, {hover:0|1}, {err:"…"}
 (() => {
   const HOST = '%HOST%';
-  const watch = location.hostname === 'www.youtube.com' && location.pathname === '/watch';
-  if (window.top !== window || !window.chrome || !window.chrome.webview || !(watch || location.hostname === HOST)) return;
+  const yt = location.hostname === 'www.youtube.com';
+  if (window.top !== window || !window.chrome || !window.chrome.webview || !(yt || location.hostname === HOST)) return;
   const post = s => window.chrome.webview.postMessage(s);
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, root;
+  let browsing = false, path = location.pathname;
+  const takeover = () => yt && location.pathname === '/watch' && !browsing; // player fills the window
   const $ = id => root.querySelector('#rp-' + id);
 
   const CSS = `
@@ -49,10 +52,12 @@
   #rp-e14 { right: 0; top: 0; width: 12px; height: 12px; cursor: nesw-resize; }
   #rp-e16 { left: 0; bottom: 0; width: 12px; height: 12px; cursor: nesw-resize; }
   #rp-e17 { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
-  ` + (watch ? `
-  html, body { overflow: hidden !important; background: #000 !important; }
-  #movie_player { position: fixed !important; left: 0 !important; top: 0 !important; width: calc(100vw - var(--rp-side, 0px)) !important; height: 100vh !important; z-index: 2147483500 !important; background: #000; }
+  ` + (yt ? `
+  html.rp-take, html.rp-take body { overflow: hidden !important; background: #000 !important; }
+  html.rp-take #movie_player { position: fixed !important; left: 0 !important; top: 0 !important; width: calc(100vw - var(--rp-side, 0px)) !important; height: 100vh !important; z-index: 2147483500 !important; background: #000; }
   #rp-stage, #rp-msg { display: none !important; }
+  html:not(.rp-take) #rp-chat { display: none !important; }
+  html:not(.rp-take) #rp-bar { top: auto; bottom: 0; right: 0; background: linear-gradient(#0000, #000d); } /* YouTube's own top bar stays usable */
   ` : `html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }`);
 
   const HTML = `
@@ -68,6 +73,7 @@
   <div id="rp-bar">
     <input id="rp-url" placeholder="Paste a YouTube link and press Enter" spellcheck="false">
     <div id="rp-live">LIVE</div>
+    <button id="rp-browse" title="Browse YouTube: search, your subscriptions, sign in"><span class="i">&#xE80F;</span><span id="rp-browseTxt">Browse</span></button>
     <button id="rp-chatBtn" hidden title="Live chat: off, beside the video, or over it"><span class="i">&#xE8BD;</span><span id="rp-chatTxt">Chat</span></button>
     <button id="rp-alpha" title="See-through: click to cycle"><span class="i">&#xE706;</span><span id="rp-alphaTxt">100%</span></button>
     <button id="rp-ghost" title="Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Hold Ctrl to use it again."><span class="i">&#xE890;</span>Ghost</button>
@@ -114,9 +120,28 @@
   const videoId = () => data().video_id || (cur && cur.id) || '';
 
   function check() {
-    if (watch) player = document.getElementById('movie_player');
-    live = !!data().isLive;
+    if (yt) {
+      if (location.pathname !== path) {
+        path = location.pathname;
+        setBrowsing(path === '/watch' ? false : browsing); // picked a video: it fills the window
+      }
+      player = document.getElementById('movie_player');
+    }
+    live = takeover() || !yt ? !!data().isLive : false;
     refresh();
+  }
+
+  function setBrowsing(on) {
+    browsing = on;
+    const take = takeover();
+    if (document.documentElement.classList.contains('rp-take') !== take) {
+      document.documentElement.classList.toggle('rp-take', take);
+      setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
+    }
+    if (!root) return;
+    // on a watch page it switches between the stretched player and the whole page; elsewhere you're already browsing
+    $('browse').hidden = yt && location.pathname !== '/watch';
+    $('browseTxt').textContent = browsing && yt ? 'Player' : 'Browse';
   }
 
   function onError(code) {
@@ -151,7 +176,7 @@
     if (side !== sideSent) {
       sideSent = side;
       post('side:' + side);
-      if (watch) setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
+      if (yt) setTimeout(() => window.dispatchEvent(new Event('resize')), 50); // the player fits itself to its new size
     }
   }
 
@@ -176,11 +201,12 @@
     const tt = window.trustedTypes && window.trustedTypes.createPolicy('resourcepill', { createHTML: s => s });
     root.innerHTML = tt ? tt.createHTML(HTML) : HTML;
     document.body.append(root);
-    if (!watch) root.classList.add('empty');
+    if (!yt) root.classList.add('empty');
+    setBrowsing(browsing);
 
     window.chrome.webview.addEventListener('message', e => {
       const m = e.data;
-      if (m.play && !watch) { $('url').blur(); play(m.play); }
+      if (m.play && !yt) { $('url').blur(); play(m.play); }
       if (m.err) show("That isn't a YouTube link", m.err);
       if (m.state) {
         chat = m.state.chat;
@@ -207,11 +233,12 @@
     $('ghost').onclick = () => post('ghost');
     $('hide').onclick = () => post('hide');
     $('close').onclick = () => post('close');
+    $('browse').onclick = () => yt ? setBrowsing(!browsing) : (location.href = 'https://www.youtube.com/');
     root.querySelectorAll('.e').forEach(el => el.addEventListener('mousedown', e => {
       if (e.button === 0) { e.preventDefault(); post('size:' + el.id.slice(4)); }
     }));
 
-    if (!watch) {
+    if (!yt) {
       window.onYouTubeIframeAPIReady = () => { apiReady = true; if (pending) { const t = pending; pending = null; play(t); } };
       const tag = document.createElement('script');
       tag.src = 'https://www.youtube.com/iframe_api';
@@ -219,7 +246,8 @@
       document.head.append(tag);
     }
     setInterval(check, 1500); // live or not (and, on YouTube's page, the video it moved on to)
-    post(watch ? 'ready:watch' : 'ready:embed');
+    if (yt) window.addEventListener('yt-navigate-finish', check); // YouTube changes pages without reloading
+    post(yt ? 'ready:youtube' : 'ready:embed');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build);

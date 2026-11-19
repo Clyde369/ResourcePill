@@ -591,7 +591,7 @@ impl App {
                 "ready" => {
                     self.video_state();
                     let Some(v) = &mut self.video else { continue };
-                    v.watch = val == "watch";
+                    v.watch = val != "embed"; // on youtube.com
                     if v.watch {
                         continue;
                     }
