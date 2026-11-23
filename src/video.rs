@@ -426,8 +426,19 @@ fn tabs_fn() -> String {
 /// a page can read page messages, and other tabs' titles are nobody else's business. The bar's
 /// receiver checks the session token, so a site can't feed it a fake strip either.
 fn push_tabs() {
+    bar_call(&tabs_json());
+}
+
+/// A short note in the bar, by the same private call as the tab strip: what you added to your list is
+/// nobody else's business, and the page on screen may be another site by the time it's ready.
+fn bar_toast(text: &str) {
+    bar_call(&serde_json::json!({ "toast": text }).to_string());
+}
+
+/// Hands `json` to the bar on the page on screen without the page's own scripts seeing it.
+fn bar_call(json: &str) {
     if let Some(wv) = active_view() {
-        let call = format!("window['{0}'] && window['{0}']('{1}', {2});", tabs_fn(), session_token(), tabs_json());
+        let call = format!("window['{0}'] && window['{0}']('{1}', {2});", tabs_fn(), session_token(), json);
         let done = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
         let _ = unsafe { wv.ExecuteScript(&HSTRING::from(call), &done) };
     }
@@ -1270,7 +1281,7 @@ impl App {
                 }
                 // Add to list: the bar sends what it found on the page; the item is worked out off the UI thread
                 "list-add" => {
-                    post(r#"{"toast":"Adding it to your list…"}"#);
+                    bar_toast("Adding it to your list…");
                     let (facts, key, region) = (val.to_string(), extras::load_key("gemini"), lists::region());
                     std::thread::spawn(move || {
                         send(match lists::item_from_page(&facts, key).and_then(|item| {
@@ -1285,10 +1296,10 @@ impl App {
                 "list-added" => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(val) {
                         post_to_lists(&format!(r#"{{"lists":{},"region":"{}"}}"#, v["data"].as_str().unwrap_or("null"), lists::region()));
-                        post(&serde_json::json!({ "toast": v["toast"] }).to_string());
+                        bar_toast(v["toast"].as_str().unwrap_or("Added to your list"));
                     }
                 }
-                "list-add-error" => post(&serde_json::json!({ "toast": val }).to_string()),
+                "list-add-error" => bar_toast(val),
                 // a link in a list: opens in a tab (a new one when the lists page is the tab on screen)
                 "list-open" if web_ok(val) => {
                     if active_url().starts_with(&lists_page()) {

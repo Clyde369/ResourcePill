@@ -44,7 +44,11 @@
   // on the page could read); defined read-only now, before any site script runs
   let pendingTabs = null;
   Object.defineProperty(window, '%TABSFN%', {
-    value: (token, data) => { if (token === TOKEN && data && isArray(data.tabs)) { if (root) renderTabs(data.tabs); else pendingTabs = data.tabs; } },
+    value: (token, data) => {
+      if (token !== TOKEN || !data) return;
+      if (isArray(data.tabs)) { if (root) renderTabs(data.tabs); else pendingTabs = data.tabs; }
+      if (typeof data.toast === 'string' && root) toast(Str(data.toast)); // notes for you, not for the page
+    },
     writable: false, configurable: false, enumerable: false,
   });
   let btnAction = null;
@@ -422,7 +426,6 @@
         refresh();
       }
       if ('hover' in m) m.hover ? showBar(true) : setTimeout(() => showBar(false), 400);
-      if (m.toast) toast(Str(m.toast));
     });
 
     const url = ui.url;
