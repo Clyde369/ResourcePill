@@ -641,6 +641,7 @@ name = "resource-pill"
 version = "0.2.0"
 dependencies = [
  "cc",
+ "serde_json",
  "webview2-com",
  "windows",
  "windows-numerics",

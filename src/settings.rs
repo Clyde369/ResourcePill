@@ -47,7 +47,7 @@ fn item_h(i: &MI) -> f32 {
 
 /// Commands that leave the panel (they open something or change what is on screen).
 fn closes_panel(id: usize) -> bool {
-    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1205 | 1300 | 1499 | 1500 | 1600 | 1601) || (600..700).contains(&id) || (1400..1499).contains(&id)
+    matches!(id, 1 | 999 | 713 | 800 | 1200 | 1201 | 1204 | 1205 | 1300 | 1499 | 1500 | 1600 | 1601 | 1602) || (600..700).contains(&id) || (1400..1499).contains(&id)
 }
 
 impl App {
@@ -187,6 +187,7 @@ impl App {
             act_r(1201, if recording { "Stop recording" } else { "Record & transcribe" }, "Ctrl+Alt+R", false),
             act(1204, "Recordings", false),
             act_r(1300, "Explain highlighted text", "Ctrl+Alt+E", false),
+            act_r(1602, "Shopping lists", "Ctrl+Alt+L · prices · calculator", false),
             {
                 let open = self.video_is_open();
                 let alphas: Vec<String> = video::ALPHAS.iter().map(|a| if *a == 100 { "Solid".into() } else { format!("{a}%") }).collect();

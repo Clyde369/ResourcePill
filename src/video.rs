@@ -14,6 +14,8 @@ use crate::*;
 
 const PAGE: &str = include_str!("video.html");
 const UI: &str = include_str!("video.js");
+const LISTS_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Lists</title></head><body></body></html>";
+const LISTS_UI: &str = include_str!("lists.js");
 const HOST: &str = "peter.pill"; // the page's own origin (YouTube needs a real one to embed and for live chat)
 pub const ALPHAS: [u8; 5] = [100, 85, 70, 50, 35]; // window opacity choices, %
 pub const CHATS: [&str; 3] = ["Off", "Beside the video", "Over the video"];
@@ -27,17 +29,22 @@ pub const TIMER_VIDEO: usize = 20; // hover bar + ghost peek: watches the mouse 
 const CLASS: PCWSTR = w!("ResourcePill.Video");
 
 static PILL: AtomicIsize = AtomicIsize::new(0);
+// what the page, WebView2 and background work (price lookups) sent, for WM_APP_VIDEO to hand to App
+static INBOX: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+fn inbox() -> std::sync::MutexGuard<'static, Vec<String>> {
+    INBOX.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 thread_local! {
     // outside App so window messages that arrive while App is busy (our own SetWindowPos) still reach them
     static WV: RefCell<Option<(ICoreWebView2Controller, ICoreWebView2)>> = const { RefCell::new(None) };
-    static INBOX: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct Video {
     hwnd: HWND,
     hidden: bool, // Ctrl+Alt+Y / the hide button (keeps playing)
     fresh: bool,  // just opened: a link on the clipboard plays first
+    start: Option<String>, // just opened for this page (the lists) instead of where it left off
     watch: bool,  // showing YouTube's own watch page (embedding is off for this video)
     side: bool,   // live chat beside the video (window is wider)
     shown: bool,
@@ -299,6 +306,7 @@ unsafe fn start_webview(hwnd: HWND) -> windows::core::Result<()> {
     let page_dir = dir.join("video");
     let _ = std::fs::create_dir_all(&page_dir);
     std::fs::write(page_dir.join("player.html"), PAGE).map_err(|_| windows::core::Error::from(E_FAIL))?;
+    std::fs::write(page_dir.join("lists.html"), LISTS_PAGE).map_err(|_| windows::core::Error::from(E_FAIL))?;
     let opts = CoreWebView2EnvironmentOptions::default();
     unsafe {
         opts.set_additional_browser_arguments("--autoplay-policy=no-user-gesture-required".into());
@@ -357,7 +365,7 @@ fn inbox_fail(e: windows::core::Error) -> windows::core::Result<()> {
 
 /// Hand a message to the pill (handled on WM_APP_VIDEO, when App is free).
 fn send(s: String) {
-    INBOX.with(|i| i.borrow_mut().push(s));
+    inbox().push(s);
     let _ = unsafe { PostMessageW(Some(HWND(PILL.load(Ordering::Relaxed) as *mut _)), WM_APP_VIDEO, WPARAM(0), LPARAM(0)) };
 }
 
@@ -401,7 +409,7 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
                 let mut p = PWSTR::null();
                 args.TryGetWebMessageAsString(&mut p)?;
                 let Some(s) = take_pwstr(p).strip_prefix(&format!("{}|", session_token())).map(str::to_string) else { return Ok(()) };
-                if s.starts_with("crashed") || s.starts_with("fail") || s.starts_with("full") {
+                if ["crashed", "fail", "full", "list-result", "list-error"].iter().any(|k| s.starts_with(k)) {
                     return Ok(()); // the window's own events, never from a page
                 }
                 // resize from the page's edges: hand the drag to Windows' own sizing loop
@@ -457,8 +465,8 @@ unsafe fn setup(hwnd: HWND, ctl: ICoreWebView2Controller, page_dir: &std::path::
         )?;
         let _ = ctl.SetBounds(client(hwnd));
         WV.with(|w| *w.borrow_mut() = Some((ctl, wv.clone())));
-        // the bar, chat and player logic go into every page (video.js only acts on ours and YouTube's watch page)
-        let ui = HSTRING::from(UI.replace("%HOST%", HOST).replace("%TOKEN%", session_token()));
+        // the bar (every page), the players (our page, YouTube's) and the lists (our lists page)
+        let ui = HSTRING::from(format!("{UI}\n{LISTS_UI}").replace("%HOST%", HOST).replace("%TOKEN%", session_token()));
         let ui_target = wv.clone();
         let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, _| {
             hr?;
@@ -477,6 +485,21 @@ impl App {
             Some(v) => {
                 v.hidden = !v.hidden;
                 self.video_place();
+            }
+        }
+    }
+
+    /// Menu / Ctrl+Alt+L: the smart lists, in the window under the pill.
+    pub fn video_lists(&mut self) {
+        let page = format!("https://{HOST}/lists.html");
+        if let Some(v) = &mut self.video {
+            v.hidden = false;
+            navigate(&page);
+            self.video_place();
+        } else {
+            self.video_open();
+            if let Some(v) = &mut self.video {
+                v.start = Some(page); // goes there once the window is ready
             }
         }
     }
@@ -510,7 +533,7 @@ impl App {
             let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
             let Ok(hwnd) = CreateWindowExW(ex, CLASS, w!("YouTube · ResourcePill"), WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, 1, 1, None, None, Some(hinst.into()), None) else { return };
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            self.video = Some(Video { hwnd, hidden: false, fresh: true, watch: false, side: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
+            self.video = Some(Video { hwnd, hidden: false, fresh: true, start: None, watch: false, side: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
             self.video_place();
             if let Err(e) = start_webview(hwnd) {
                 inbox_fail(e).ok();
@@ -528,7 +551,7 @@ impl App {
             }
             let _ = DestroyWindow(v.hwnd);
         }
-        INBOX.with(|i| i.borrow_mut().clear());
+        inbox().clear();
         self.cfg.save();
     }
 
@@ -630,7 +653,7 @@ impl App {
     /// TIMER_VIDEO: the hover bar, and ghost peeking (fade while the mouse is over it, Ctrl to use it).
     pub fn video_tick(&mut self) {
         // anything WM_APP_VIDEO couldn't hand over (it arrived while App was busy in a nested message loop)
-        if INBOX.with(|i| !i.borrow().is_empty()) {
+        if !inbox().is_empty() {
             self.video_inbox();
         }
         let ghost = self.cfg.video_ghost;
@@ -700,7 +723,8 @@ impl App {
 
     /// WM_APP_VIDEO: what the page (or WebView2) sent.
     pub fn video_inbox(&mut self) {
-        for m in INBOX.with(|i| std::mem::take(&mut *i.borrow_mut())) {
+        let msgs = std::mem::take(&mut *inbox());
+        for m in msgs {
             let (k, val) = m.split_once(':').unwrap_or((&m, ""));
             match k {
                 "ready" => {
@@ -708,6 +732,11 @@ impl App {
                     let Some(v) = &mut self.video else { continue };
                     v.watch = val != "embed"; // on some site, not our page
                     if v.watch {
+                        continue;
+                    }
+                    if let Some(page) = v.start.take() {
+                        v.fresh = false;
+                        navigate(&page); // opened for the lists
                         continue;
                     }
                     // just opened: a YouTube/Twitch link on the clipboard wins, else carry on where you were.
@@ -741,6 +770,31 @@ impl App {
                         navigate(&format!("https://www.youtube.com/watch?v={id}{list}&t={start}s"));
                     }
                 }
+                // ---- smart lists (lists.js) ----
+                "list-load" => post(&format!(r#"{{"lists":{},"region":"{}"}}"#, lists::load(), lists::region())),
+                "list-save" => {
+                    lists::save(val);
+                }
+                "list-share" => {
+                    let (kind, text) = val.split_once('|').unwrap_or((val, ""));
+                    if let Some(url) = lists::share_url(kind, text) {
+                        unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+                    }
+                }
+                "list-prices" => match extras::load_key("gemini") {
+                    None => post(&format!(r#"{{"pricesErr":{}}}"#, serde_json::json!("Price comparison uses Gemini with Google Search. Get a free key at aistudio.google.com/apikey, copy it, then ⚙ → AI & API keys → Paste API key from clipboard."))),
+                    Some(key) => {
+                        let request = val.to_string();
+                        std::thread::spawn(move || {
+                            send(match lists::compare(&key, &request, &lists::region()) {
+                                Ok(json) => format!("list-result:{json}"),
+                                Err(e) => format!("list-error:{e}"),
+                            });
+                        });
+                    }
+                },
+                "list-result" => post(&format!(r#"{{"prices":{val}}}"#)),
+                "list-error" => post(&format!(r#"{{"pricesErr":{}}}"#, serde_json::json!(val))),
                 "chat" => self.video_set_chat(val.parse().unwrap_or(0)),
                 "side" => {
                     if let Some(v) = &mut self.video {

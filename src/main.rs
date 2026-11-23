@@ -19,6 +19,10 @@ mod bundle;
 mod setup;
 mod update;
 mod video;
+mod lists;
+#[allow(dead_code)] // the helper's HTTPS code; the lists use only post_json
+#[path = "../scribe/src/net.rs"]
+mod net;
 #[allow(dead_code)] // download fields are used by the helper
 mod catalog;
 
@@ -109,6 +113,7 @@ const HOTKEY_EXPLAIN: i32 = 3; // Ctrl+Alt+E
 const HOTKEY_MIXER: i32 = 4; // Ctrl+Alt+V
 const HOTKEY_VIDEO: i32 = 5; // Ctrl+Alt+Y
 const HOTKEY_GHOST: i32 = 6; // Ctrl+Alt+G
+const HOTKEY_LISTS: i32 = 7; // Ctrl+Alt+L
 const CLASS: PCWSTR = w!("ResourcePill.Window");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: PCWSTR = w!("ResourcePill");
@@ -845,6 +850,7 @@ impl App {
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_MIXER, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'V' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_VIDEO, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Y' as u32);
             let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_GHOST, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'G' as u32);
+            let _ = RegisterHotKey(Some(self.hwnd), HOTKEY_LISTS, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L' as u32);
             SetTimer(Some(self.hwnd), TIMER_BLINK, 3000, None);
             self.sync_edge_timer();
             self.vram_total = recorder::vram_total();
@@ -1259,6 +1265,7 @@ impl App {
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_EXPLAIN => self.explain_now(), // highlight, then press
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_MIXER => self.toggle_mixer(),
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_VIDEO => self.video_hotkey(),
+                WM_HOTKEY if wp.0 as i32 == HOTKEY_LISTS => self.video_lists(),
                 WM_HOTKEY if wp.0 as i32 == HOTKEY_GHOST => self.video_set_ghost(!self.cfg.video_ghost), // the way out of ghost from anywhere
                 video::WM_APP_VIDEO => self.video_inbox(),
                 WM_TIMER if wp.0 == video::TIMER_VIDEO => self.video_tick(),
@@ -3109,6 +3116,7 @@ impl App {
             1600 if self.video_is_open() => self.video_close(),
             1600 => self.video_open(),
             1601 => self.video_hotkey(),
+            1602 => self.video_lists(),
             1610..=1619 if id - 1610 < video::ALPHAS.len() => self.video_set_alpha(id - 1610),
             1620..=1622 => self.video_set_chat(id - 1620),
             1630 => self.video_set_ghost(!self.cfg.video_ghost),

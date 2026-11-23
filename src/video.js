@@ -12,7 +12,7 @@
 (() => {
   const HOST = '%HOST%';
   if (window.top !== window || !window.chrome || !window.chrome.webview) return;
-  const ours = location.hostname === HOST;
+  const ours = location.hostname === HOST && location.pathname === '/player.html'; // the player page (lists.html is lists.js)
   const yt = location.hostname === 'www.youtube.com';
   // every message carries this session's token (only this script has it), so a site can't drive the window itself
   const pm = window.chrome.webview.postMessage.bind(window.chrome.webview);
@@ -235,7 +235,7 @@
         h('div', { id: 'msg' },
           h('b', { id: 'title' }, 'Watch and browse under the pill'),
           h('span', { id: 'text' }, 'Paste a YouTube or Twitch link to watch it here, with live chat beside or over it. Or type any address or search: sign in to sites and they stay signed in.'),
-          h('div', { id: 'tiles' }, tile('YouTube', 'youtube.com'), tile('Twitch', 'twitch.tv'), tile('Google', 'google.com')),
+          h('div', { id: 'tiles' }, tile('YouTube', 'youtube.com'), tile('Twitch', 'twitch.tv'), tile('Google', 'google.com'), tile('Shopping lists', '/lists.html')),
           h('button', { id: 'btn', hidden: true }))) : null,
       h('iframe', { id: 'chat', title: 'Live chat', allow: 'clipboard-write' }),
       h('div', { id: 'toast' }),
@@ -281,7 +281,7 @@
     on(url, 'paste', () => setTimeout(() => { if (ours) open(); }, 0)); // on the start page a pasted link opens at once
     url.addEventListener('focus', () => url.select());
     url.addEventListener('blur', () => showBar(true));
-    if (ours) root.querySelectorAll('#tiles button').forEach(b => on(b, 'click', () => post('open:' + b.title)));
+    if (ours) root.querySelectorAll('#tiles button').forEach(b => on(b, 'click', () => b.title.startsWith('/') ? (location.href = b.title) : post('open:' + b.title)));
     on(ui.btn, 'click', () => btnAction && btnAction());
     on(ui.back, 'click', () => history.back());
     on(ui.chatBtn, 'click', () => post('chat:' + (chat + 1) % 3));
