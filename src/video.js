@@ -26,6 +26,24 @@
   // only real clicks and keys reach the pill: never a page script's .click() or a look-alike object.
   // Handlers go on through the saved addEventListener, so a page can't even see them
   const on = (el, type, fn) => apply(listen, el, [type, e => { if (trusted(e)) fn(e); }]);
+  // what the tab strip is drawn with: the browser's own versions, so a site can't watch the titles go in
+  const N = {
+    create: Document.prototype.createElement, append: Node.prototype.appendChild, attr: Element.prototype.setAttribute,
+    text: Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set, clear: Element.prototype.replaceChildren,
+  };
+  const el = (tag, cls, text) => {
+    const e = apply(N.create, document, [tag]);
+    if (cls) apply(N.attr, e, ['class', cls]);
+    if (text != null) apply(N.text, e, [text]);
+    return e;
+  };
+  // the tab strip arrives by a direct call from the pill (never as a page message, which every script
+  // on the page could read); defined read-only now, before any site script runs
+  let pendingTabs = null;
+  Object.defineProperty(window, '%TABSFN%', {
+    value: (token, data) => { if (token === '%TOKEN%' && data && Array.isArray(data.tabs)) { if (root) renderTabs(data.tabs); else pendingTabs = data.tabs; } },
+    writable: false, configurable: false, enumerable: false,
+  });
   let btnAction = null;
   let player = null, cur = null, chat = 1, live = false, apiReady = false, pending = null, hideTimer = 0, sideSent = -1, ghost = null, toastTimer = 0;
   let root, ui = {}, path = location.pathname;
@@ -221,19 +239,26 @@
   let activeTab = -1;
   function renderTabs(tabs) {
     const row = ui.tabrow;
-    row.replaceChildren();
+    apply(N.clear, row, []);
     for (const t of tabs) {
       if (t.active) activeTab = t.id;
-      const close = h('span', { class: 'x', title: 'Close tab (Ctrl+W)' }, '×');
-      const tab = h('button', { class: 'tab' + (t.active ? ' on' : '') + (t.asleep ? ' asleep' : ''), title: t.title + (t.asleep ? ' (asleep: loads when you open it)' : '') },
-        t.audio ? h('span', { class: 'i' }, '') : null, h('span', { class: 't' }, t.title || 'Tab'), close);
-      on(tab, 'click', e => post(e.target === close ? 'tab-close:' + t.id : 'tab:' + t.id));
-      on(tab, 'auxclick', e => { if (e.button === 1) post('tab-close:' + t.id); }); // middle-click closes, like a browser
-      row.append(tab);
+      const title = String(t.title || 'Tab');
+      const tab = el('button', 'tab' + (t.active ? ' on' : '') + (t.asleep ? ' asleep' : ''));
+      apply(N.attr, tab, ['title', title + (t.asleep ? ' (asleep: loads when you open it)' : '')]);
+      if (t.audio) apply(N.append, tab, [el('span', 'i', '')]);
+      apply(N.append, tab, [el('span', 't', title)]);
+      const close = el('span', 'x', '×');
+      apply(N.attr, close, ['title', 'Close tab (Ctrl+W)']);
+      apply(N.append, tab, [close]);
+      const id = Number(t.id);
+      on(tab, 'click', e => post(e.target === close ? 'tab-close:' + id : 'tab:' + id));
+      on(tab, 'auxclick', e => { if (e.button === 1) post('tab-close:' + id); }); // middle-click closes, like a browser
+      apply(N.append, row, [tab]);
     }
-    const plus = h('button', { class: 'plus', title: 'New tab (Ctrl+T)' }, '+');
+    const plus = el('button', 'plus', '+');
+    apply(N.attr, plus, ['title', 'New tab (Ctrl+T)']);
     on(plus, 'click', () => post('tab-new'));
-    row.append(plus);
+    apply(N.append, row, [plus]);
   }
 
   function toast(text) {
@@ -287,13 +312,14 @@
     shadow.append(root);
     document.documentElement.append(host); // outside <body>: some sites replace it
     if (ours) root.classList.add('empty');
+    if (pendingTabs) { renderTabs(pendingTabs); pendingTabs = null; }
     layout();
 
     window.chrome.webview.addEventListener('message', e => {
       const m = e.data;
       if (m.play && ours) { ui.url.blur(); play(m.play); }
       if (m.err) show("Couldn't open that", m.err);
-      if (m.tabs) renderTabs(m.tabs);
+
       if (m.state) {
         sideSent = -1; // say again whether chat sits beside the video (the window may have changed tab)
         chat = m.state.chat;

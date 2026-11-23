@@ -299,7 +299,26 @@ fn active_url() -> String {
     browser(|b| b.tabs.iter().find(|t| t.id == b.active).map(|t| t.url.clone())).flatten().unwrap_or_default()
 }
 
-/// The tab strip for the page: [{id, title, active, audio, asleep}].
+/// Name of the bar's tab-strip receiver on each page: random per run (sites can find it, but can't
+/// replace it: the bar defines it read-only before any site script runs).
+fn tabs_fn() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static N: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    N.get_or_init(|| format!("rp{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish())).clone()
+}
+
+/// The tab strip goes straight into the bar by a script call, not by a page message: every script on
+/// a page can read page messages, and other tabs' titles are nobody else's business. The bar's
+/// receiver checks the session token, so a site can't feed it a fake strip either.
+fn push_tabs() {
+    if let Some(wv) = active_view() {
+        let call = format!("window['{0}'] && window['{0}']('{1}', {2});", tabs_fn(), session_token(), tabs_json());
+        let done = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let _ = unsafe { wv.ExecuteScript(&HSTRING::from(call), &done) };
+    }
+}
+
+/// The tab strip for the bar: {tabs: [{id, title, active, audio, asleep}]}.
 fn tabs_json() -> String {
     browser(|b| {
         let tabs: Vec<serde_json::Value> = b
@@ -745,7 +764,7 @@ unsafe fn setup(hwnd: HWND, id: u32, ctl: ICoreWebView2Controller) -> windows::c
         .flatten()
         .unwrap_or_else(start_page);
         // the bar (every page), the players (our page, YouTube's) and the lists (our lists page)
-        let ui = HSTRING::from(format!("{UI}\n{LISTS_UI}").replace("%HOST%", HOST).replace("%TOKEN%", session_token()));
+        let ui = HSTRING::from(format!("{UI}\n{LISTS_UI}").replace("%HOST%", HOST).replace("%TOKEN%", session_token()).replace("%TABSFN%", &tabs_fn()));
         let ui_target = wv.clone();
         let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, _| {
             hr?;
@@ -1032,7 +1051,7 @@ impl App {
             match k {
                 "ready" => {
                     self.video_state();
-                    post(&tabs_json());
+                    push_tabs();
                     let Some(v) = &mut self.video else { continue };
                     if val != "embed" || active_url().ends_with("#new") {
                         continue; // some site, or a new tab: nothing to play
@@ -1069,7 +1088,7 @@ impl App {
                     }
                 }
                 // ---- tabs ----
-                "tabs" => post(&tabs_json()),
+                "tabs" => push_tabs(),
                 "tab-shown" => {
                     // a page kept alive in the background is back: it re-sends its chat layout with the state
                     if let Some(v) = &mut self.video {
