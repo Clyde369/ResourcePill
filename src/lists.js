@@ -7,7 +7,8 @@
   if (window.top !== window || !window.chrome || !window.chrome.webview) return;
   if (location.hostname !== '%HOST%' || location.pathname !== '/lists.html') return;
   const pm = window.chrome.webview.postMessage.bind(window.chrome.webview);
-  const post = s => pm('%TOKEN%|' + s);
+  const TOKEN = '%TOKEN%'; // only in this closure, never written out in a function a page can reach
+  const post = s => pm(TOKEN + '|' + s);
 
   const CURRENCY = { ZA: 'ZAR', US: 'USD', GB: 'GBP', AU: 'AUD', CA: 'CAD', NZ: 'NZD', IN: 'INR', NG: 'NGN', KE: 'KES', BW: 'BWP', NA: 'NAD', ZW: 'USD', JP: 'JPY', CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK', BR: 'BRL', MX: 'MXN', AE: 'AED' };
   const EURO = 'AT BE CY DE EE ES FI FR GR HR IE IT LT LU LV MT NL PT SI SK'.split(' ');

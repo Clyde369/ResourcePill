@@ -16,7 +16,9 @@
   const yt = location.hostname === 'www.youtube.com';
   // every message carries this session's token (only this script has it), so a site can't drive the window itself
   const pm = window.chrome.webview.postMessage.bind(window.chrome.webview);
-  const post = s => pm('%TOKEN%|' + s);
+  // the token lives only in this closure: never written out in a function a page could call .toString() on
+  const TOKEN = '%TOKEN%';
+  const post = s => pm(TOKEN + '|' + s);
   // the browser's own versions, taken before any page script runs (a page can't swap them to reach into the bar)
   const apply = Reflect.apply;
   const attachShadow = Element.prototype.attachShadow;
@@ -31,6 +33,7 @@
     create: Document.prototype.createElement, append: Node.prototype.appendChild, attr: Element.prototype.setAttribute,
     text: Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set, clear: Element.prototype.replaceChildren,
   };
+  const isArray = Array.isArray, Str = String, Num = Number; // saved too: a site can't swap them to see the titles
   const el = (tag, cls, text) => {
     const e = apply(N.create, document, [tag]);
     if (cls) apply(N.attr, e, ['class', cls]);
@@ -41,7 +44,7 @@
   // on the page could read); defined read-only now, before any site script runs
   let pendingTabs = null;
   Object.defineProperty(window, '%TABSFN%', {
-    value: (token, data) => { if (token === '%TOKEN%' && data && Array.isArray(data.tabs)) { if (root) renderTabs(data.tabs); else pendingTabs = data.tabs; } },
+    value: (token, data) => { if (token === TOKEN && data && isArray(data.tabs)) { if (root) renderTabs(data.tabs); else pendingTabs = data.tabs; } },
     writable: false, configurable: false, enumerable: false,
   });
   let btnAction = null;
@@ -240,9 +243,11 @@
   function renderTabs(tabs) {
     const row = ui.tabrow;
     apply(N.clear, row, []);
-    for (const t of tabs) {
-      if (t.active) activeTab = t.id;
-      const title = String(t.title || 'Tab');
+    // a counted loop, not for...of: a site can swap the array iterator, not plain indexing of our own data
+    for (let i = 0, n = tabs.length; i < n; i++) {
+      const t = tabs[i];
+      if (t.active) activeTab = Num(t.id);
+      const title = Str(t.title || 'Tab');
       const tab = el('button', 'tab' + (t.active ? ' on' : '') + (t.asleep ? ' asleep' : ''));
       apply(N.attr, tab, ['title', title + (t.asleep ? ' (asleep: loads when you open it)' : '')]);
       if (t.audio) apply(N.append, tab, [el('span', 'i', '')]);
@@ -250,7 +255,7 @@
       const close = el('span', 'x', '×');
       apply(N.attr, close, ['title', 'Close tab (Ctrl+W)']);
       apply(N.append, tab, [close]);
-      const id = Number(t.id);
+      const id = Num(t.id);
       on(tab, 'click', e => post(e.target === close ? 'tab-close:' + id : 'tab:' + id));
       on(tab, 'auxclick', e => { if (e.button === 1) post('tab-close:' + id); }); // middle-click closes, like a browser
       apply(N.append, row, [tab]);
