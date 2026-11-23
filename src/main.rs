@@ -642,6 +642,7 @@ struct App {
     icons: std::collections::HashMap<String, ID2D1Bitmap>, // app icons by program path (the auto-lower badge)
     voice: Option<windows::Win32::Media::Speech::ISpVoice>,
     blink_at: Option<Instant>,
+    wink: bool, // this blink is a wink: one eye, held a little longer
     vram_total: f64,
     fade: f32,
     want_visible: bool,
@@ -801,6 +802,7 @@ impl App {
                 icons: Default::default(),
                 voice: None,
                 blink_at: None,
+                wink: false,
                 vram_total: 0.0,
                 fade: 0.0,
                 want_visible: true,
@@ -1339,6 +1341,7 @@ impl App {
                 WM_TIMER if wp.0 == TIMER_BLINK => {
                     // blink, then schedule the next one 2.5-7 s later
                     self.blink_at = Some(Instant::now());
+                    self.wink = windows::Win32::System::SystemInformation::GetTickCount() % 4 == 0; // about one blink in four
                     let next = 2500 + (windows::Win32::System::SystemInformation::GetTickCount() % 4500);
                     SetTimer(Some(self.hwnd), TIMER_BLINK, next, None);
                     self.kick();
@@ -2040,7 +2043,7 @@ impl App {
             }
         }
         go(&mut self.fade, if self.want_visible { 1.0 } else { 0.0 }, 12.0, 0.003);
-        if self.blink_at.is_some_and(|t| t.elapsed().as_secs_f32() < 0.24) {
+        if self.blink_at.is_some_and(|t| t.elapsed().as_secs_f32() < self.blink_len()) {
             moving = true; // keep frames coming for the blink
         }
         if self.sheen >= 0.0 {
@@ -2454,6 +2457,11 @@ impl App {
         }
     }
 
+    /// How long a blink takes (a wink is held a little longer).
+    fn blink_len(&self) -> f32 {
+        if self.wink { 0.5 } else { 0.24 }
+    }
+
     /// The living helper: a glossy blob with eyes. Idle it blinks now and then; while working it
     /// bobs and looks around; in explain mode its eyes follow your cursor.
     fn draw_mascot(&self, r: R, pill: R) {
@@ -2485,7 +2493,8 @@ impl App {
         };
         let blink = self.blink_at.map_or(1.0, |b| {
             let e = b.elapsed().as_secs_f32();
-            if e < 0.24 { (1.0 - (e / 0.12 - 1.0).abs()).mul_add(-0.85, 1.0) } else { 1.0 }
+            let half = self.blink_len() / 2.0;
+            if e < half * 2.0 { (1.0 - (e / half - 1.0).abs()).mul_add(-0.85, 1.0) } else { 1.0 }
         });
         let body = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad, radiusY: rad * 0.94 };
         unsafe {
@@ -2501,6 +2510,7 @@ impl App {
             for side in [-1.0f32, 1.0] {
                 let ex = cx + side * 3.8;
                 let ey = cy - 0.5;
+                let blink = if self.wink && side < 0.0 { 1.0 } else { blink }; // a wink: his left eye stays open
                 self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(ex, ey), radiusX: 2.7, radiusY: 3.3 * blink }, self.color(0xFFFFFF, 0.97));
                 if blink > 0.4 {
                     self.rt.FillEllipse(&D2D1_ELLIPSE { point: pt(ex + lx * 1.1, ey + ly * 1.3), radiusX: 1.35, radiusY: 1.5 * blink }, self.color(0x101018, 1.0));
