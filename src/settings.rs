@@ -214,6 +214,7 @@ impl App {
             MI::Sep,
             act_r(710, if self.tucked { "Bring back from the edge" } else { "Tuck into the screen edge" }, "Ctrl+Alt+M", false),
             act(1, if self.want_visible { "Hide completely" } else { "Show" }, false),
+            if update::available().is_none() { act_r(1501, "Check for updates", &update::status_text(), false) } else { MI::Sep },
             act(999, "Quit", false),
         ]);
         top

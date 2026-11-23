@@ -22,8 +22,36 @@ pub fn available() -> Option<Release> {
     LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// What the last check said (shown on "Check for updates" in the menu).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Status {
+    NotYet,
+    Checking,
+    UpToDate,
+    Off,    // a folder install (helper beside the exe): updated by hand
+    Failed, // offline, GitHub unreachable, no helper
+}
+
+static STATUS: Mutex<Status> = Mutex::new(Status::NotYet);
+
+pub fn status() -> Status {
+    *STATUS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The menu's note for "Check for updates".
+pub fn status_text() -> String {
+    let v = env!("CARGO_PKG_VERSION");
+    match status() {
+        Status::NotYet => format!("v{v}"),
+        Status::Checking => "checking…".into(),
+        Status::UpToDate => format!("v{v} · up to date"),
+        Status::Off => "off: a helper sits beside the exe".into(),
+        Status::Failed => format!("v{v} · couldn't reach GitHub"),
+    }
+}
+
 /// Checks shortly after start, then once a day, on its own thread. Offline, no releases or
-/// anything odd = no update, silently.
+/// anything odd = no update (the menu says why).
 pub fn spawn_checks() {
     std::thread::spawn(|| loop {
         std::thread::sleep(Duration::from_secs(30));
@@ -31,22 +59,48 @@ pub fn spawn_checks() {
         if let Some(me) = std::env::current_exe().ok().filter(|_| safe_to_replace()) {
             let _ = std::fs::remove_file(old_path(&me));
         }
-        if let Some(r) = check() {
-            *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-        }
+        run_check();
         std::thread::sleep(Duration::from_secs(24 * 3600));
     });
 }
 
-fn check() -> Option<Release> {
-    // a folder install (helper beside the exe, e.g. a dev build) is updated by hand
-    let me = std::env::current_exe().ok()?;
-    if crate::bundle::helper_dir().as_deref() == me.parent() {
-        return None;
+/// Menu → Check for updates: checks now, then `done` (to redraw the menu with the answer).
+pub fn check_now(done: impl Fn() + Send + 'static) {
+    if status() == Status::Checking {
+        return;
     }
-    let out = Command::new(crate::recorder::helper()?).arg("--update-check").stdin(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000 | 0x0000_4000).output().ok()?;
-    let line = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("RELEASE\t").map(str::to_string))?;
-    parse(&line, env!("CARGO_PKG_VERSION"))
+    *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Status::Checking;
+    done();
+    std::thread::spawn(move || {
+        run_check();
+        done();
+    });
+}
+
+fn run_check() {
+    let found = check();
+    let mut s = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    match found {
+        Ok(Some(r)) => {
+            *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            *s = Status::UpToDate; // the menu shows "New update available" instead
+        }
+        Ok(None) => *s = Status::UpToDate,
+        Err(why) => *s = why,
+    }
+}
+
+/// A newer release, None when this is the newest, or why it couldn't tell.
+fn check() -> Result<Option<Release>, Status> {
+    // a folder install (helper beside the exe, e.g. a dev build) is updated by hand
+    let me = std::env::current_exe().map_err(|_| Status::Failed)?;
+    if crate::bundle::helper_dir().as_deref() == me.parent() {
+        return Err(Status::Off);
+    }
+    let helper = crate::recorder::helper().ok_or(Status::Failed)?;
+    let out = Command::new(helper).arg("--update-check").stdin(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000 | 0x0000_4000).output().map_err(|_| Status::Failed)?;
+    let line = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("RELEASE\t").map(str::to_string)).ok_or(Status::Failed)?;
+    Ok(parse(&line, env!("CARGO_PKG_VERSION")))
 }
 
 /// `tag \t url \t digest` from the helper → a release newer than `current` with a SHA-256 digest.

@@ -1301,6 +1301,10 @@ impl App {
                     self.settings_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16, panel);
                 }
                 WM_APP_JOB => {
+                    if self.settings.is_some() {
+                        self.settings_cache = self.settings_items(); // e.g. an update check finished: the menu shows it
+                        self.kick();
+                    }
                     let was_running = self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running);
                     if self.job.as_mut().is_some_and(|j| j.pump()) {
                         let answer = self.job.as_ref().filter(|j| was_running && j.kind == recorder::JobKind::Explain && j.state == recorder::JobState::Done).map(|j| j.text.clone());
@@ -3111,6 +3115,10 @@ impl App {
             }
             1300 => {
                 self.explain_now();
+                return;
+            }
+            1501 => {
+                update::check_now(self.job_notify()); // the menu shows "checking…", then the answer
                 return;
             }
             1500 => {

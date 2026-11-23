@@ -80,6 +80,7 @@ The files are also in your recordings folder (default `Documents\ResourcePill\Re
 
 - **Explain mode**: highlight text anywhere and ask Peter to explain or search it (local or Gemini).
 - **Edge tuck**: drag the pill against a screen edge to tuck it away, tap the edge to bring it back.
+- **Updates**: the pill checks GitHub shortly after it starts and once a day; **⚙ → Check for updates** checks now and says whether you are up to date. A copy running from a folder with `ResourcePill-Scribe.exe` beside it (a developer setup) is updated by hand.
 - **Accurate stats**: Task Manager's own data sources. Top 3 apps for CPU, RAM, GPU and disk; temperatures for GPU and NVMe (CPU and SATA in admin mode).
 - **Views**: pill, vertical capsule when docked to a side, or a card with 60-second graphs (double-click).
 - **Themes**: Graphite, Midnight, OLED, Glass, Frost, Light, Sunset, Mono.
