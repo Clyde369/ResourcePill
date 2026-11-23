@@ -40,8 +40,18 @@
   #stage iframe, #stage > div { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
   #chat { display: none; position: absolute; border: 0; background: #0f0f0f; pointer-events: auto; }
   #rp.side #chat { display: block; right: 0; top: 0; height: 100%; width: 300px; border-left: 1px solid #ffffff14; }
-  #rp.over #chat { display: block; right: 10px; top: 46px; height: calc(100% - 104px); width: min(36%, 340px); border-radius: 10px; opacity: .8; box-shadow: 0 4px 24px #0009; }
-  #bar { position: absolute; left: 0; right: var(--side); top: 0; height: 44px; padding: 0 8px; display: flex; align-items: center; gap: 4px; background: linear-gradient(#000d, #0000); opacity: 0; pointer-events: none; transition: opacity .18s; }
+  #rp.over #chat { display: block; right: 10px; top: 84px; height: calc(100% - 142px); width: min(36%, 340px); border-radius: 10px; opacity: .8; box-shadow: 0 4px 24px #0009; }
+  #bar { position: absolute; left: 0; right: var(--side); top: 0; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 4px; background: linear-gradient(#000e, #000a 70%, #0000); opacity: 0; pointer-events: none; transition: opacity .18s; }
+  #ctrl { display: flex; align-items: center; gap: 4px; height: 30px; }
+  #tabrow { display: flex; align-items: center; gap: 4px; height: 28px; overflow-x: auto; scrollbar-width: none; }
+  #tabrow:empty { display: none; }
+  #tabrow .tab { max-width: 190px; min-width: 60px; height: 26px; padding: 0 4px 0 10px; gap: 6px; justify-content: space-between; background: #1f2126cc; }
+  #tabrow .tab.on { background: #3a3f48; box-shadow: inset 0 -2px 0 #5ac8fa; }
+  #tabrow .tab.asleep .t { opacity: .55; }
+  #tabrow .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  #tabrow .x { width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 13px; opacity: .6; }
+  #tabrow .x:hover { opacity: 1; background: #ffffff22; }
+  #tabrow .plus { min-width: 26px; width: 26px; height: 26px; padding: 0; font-size: 16px; }
   #rp.browse #bar { top: auto; bottom: 0; right: 0; background: linear-gradient(#0000, #000d); } /* the site's own top bar stays usable */
   #rp.ui #bar, #rp.empty #bar, #rp.err #bar { opacity: 1; pointer-events: auto; }
   #url { flex: 1; min-width: 60px; height: 28px; border-radius: 14px; border: 1px solid #ffffff22; background: #1c1c1fcc; color: inherit; padding: 0 12px; font: inherit; outline: none; user-select: text; }
@@ -115,6 +125,7 @@
     cur = t;
     live = false;
     root.classList.remove('empty', 'err');
+    document.title = t.kind === 'tw' ? 'Twitch · ' + (t.channel || 'video') : 'YouTube'; // the tab's name until the video's own title is known
     if (t.kind === 'tw') {
       clearStage();
       const src = t.clip ? 'https://clips.twitch.tv/embed?clip=' + t.clip : 'https://player.twitch.tv/?' + (t.video ? 'video=v' + t.video : 'channel=' + t.channel);
@@ -152,6 +163,7 @@
     if (yt) player = document.getElementById('movie_player');
     if (!ui.url.matches(':focus') && !ours) ui.url.value = location.href;
     if (!(cur && cur.kind === 'tw')) live = playerPage() ? !!data().isLive : false;
+    if (ours && data().title && document.title !== data().title) document.title = data().title; // name the tab after the video
     refresh();
   }
 
@@ -205,6 +217,25 @@
     }
   }
 
+  // the tab strip (from the pill): title, a speaker while it plays sound, dim while asleep (unloaded)
+  let activeTab = -1;
+  function renderTabs(tabs) {
+    const row = ui.tabrow;
+    row.replaceChildren();
+    for (const t of tabs) {
+      if (t.active) activeTab = t.id;
+      const close = h('span', { class: 'x', title: 'Close tab (Ctrl+W)' }, '×');
+      const tab = h('button', { class: 'tab' + (t.active ? ' on' : '') + (t.asleep ? ' asleep' : ''), title: t.title + (t.asleep ? ' (asleep: loads when you open it)' : '') },
+        t.audio ? h('span', { class: 'i' }, '') : null, h('span', { class: 't' }, t.title || 'Tab'), close);
+      on(tab, 'click', e => post(e.target === close ? 'tab-close:' + t.id : 'tab:' + t.id));
+      on(tab, 'auxclick', e => { if (e.button === 1) post('tab-close:' + t.id); }); // middle-click closes, like a browser
+      row.append(tab);
+    }
+    const plus = h('button', { class: 'plus', title: 'New tab (Ctrl+T)' }, '+');
+    on(plus, 'click', () => post('tab-new'));
+    row.append(plus);
+  }
+
   function toast(text) {
     ui.toast.textContent = text;
     ui.toast.classList.add('on');
@@ -240,14 +271,18 @@
       h('iframe', { id: 'chat', title: 'Live chat', allow: 'clipboard-write' }),
       h('div', { id: 'toast' }),
       h('div', { id: 'bar' },
+        h('div', { id: 'tabrow' }),
+        h('div', { id: 'ctrl' },
         h('button', { id: 'back', title: 'Back', icon: '' }),
+        h('button', { id: 'fwd', title: 'Forward', icon: '' }),
+        h('button', { id: 'reload', title: 'Reload (F5)', icon: '' }),
         h('input', { id: 'url', placeholder: 'Paste a link, type an address or search', spellcheck: 'false' }),
         h('div', { id: 'live' }, 'LIVE'),
         h('button', { id: 'chatBtn', hidden: true, title: 'Live chat: off, beside the video, or over it', icon: '' }, h('span', { id: 'chatTxt' }, 'Chat')),
         h('button', { id: 'alpha', title: 'See-through: click to cycle', icon: '' }, h('span', { id: 'alphaTxt' }, '100%')),
         h('button', { id: 'ghost', title: "Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Ctrl+Alt+G turns it on and off from anywhere; or hold Ctrl over it to use it.", icon: '' }, 'Ghost'),
         h('button', { id: 'hide', title: 'Hide (Ctrl+Alt+Y brings it back; the sound keeps playing)', icon: '' }),
-        h('button', { id: 'close', title: 'Close', icon: '' })),
+        h('button', { id: 'close', title: 'Close', icon: '' }))),
       ...[10, 11, 12, 15, 13, 14, 16, 17].map(n => h('div', { class: 'e', id: 'e' + n })));
     shadow.append(root);
     document.documentElement.append(host); // outside <body>: some sites replace it
@@ -258,7 +293,9 @@
       const m = e.data;
       if (m.play && ours) { ui.url.blur(); play(m.play); }
       if (m.err) show("Couldn't open that", m.err);
+      if (m.tabs) renderTabs(m.tabs);
       if (m.state) {
+        sideSent = -1; // say again whether chat sits beside the video (the window may have changed tab)
         chat = m.state.chat;
         ui.alphaTxt.textContent = m.state.alpha + '%';
         ui.alpha.classList.toggle('on', m.state.alpha < 100);
@@ -284,6 +321,16 @@
     if (ours) root.querySelectorAll('#tiles button').forEach(b => on(b, 'click', () => b.title.startsWith('/') ? (location.href = b.title) : post('open:' + b.title)));
     on(ui.btn, 'click', () => btnAction && btnAction());
     on(ui.back, 'click', () => history.back());
+    on(ui.fwd, 'click', () => history.forward());
+    on(ui.reload, 'click', () => location.reload());
+    // browser keys: Ctrl+T new tab, Ctrl+W close it, Ctrl+(Shift+)Tab next/previous, Ctrl+L the address bar
+    apply(listen, window, ['keydown', e => {
+      if (!trusted(e) || !e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      const act = k === 't' ? 'tab-new' : k === 'w' ? 'tab-close:' + activeTab : k === 'tab' ? (e.shiftKey ? 'tab-prev' : 'tab-next') : null;
+      if (act) { e.preventDefault(); e.stopPropagation(); post(act); }
+      if (k === 'l') { e.preventDefault(); showBar(true); ui.url.focus(); }
+    }, true]);
     on(ui.chatBtn, 'click', () => post('chat:' + (chat + 1) % 3));
     on(ui.alpha, 'click', () => post('alpha'));
     on(ui.ghost, 'click', () => post('ghost'));
