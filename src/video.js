@@ -354,11 +354,12 @@
     });
   }
 
+  // drawn with the saved browser functions: a site can't swap textContent to read your notes
   function toast(text) {
-    ui.toast.textContent = text;
-    ui.toast.classList.add('on');
+    apply(N.text, ui.toast, [Str(text)]);
+    apply(N.attr, ui.toast, ['class', 'on']);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => ui.toast.classList.remove('on'), 4000);
+    toastTimer = setTimeout(() => apply(N.attr, ui.toast, ['class', '']), 4000);
   }
 
   function showBar(on) {
