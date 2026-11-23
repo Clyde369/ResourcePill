@@ -960,6 +960,11 @@ impl App {
         self.video_place();
     }
 
+    /// A browser tab is playing sound (an update waits for it).
+    pub fn video_playing(&self) -> bool {
+        self.video.is_some() && browser(|b| b.tabs.iter().any(|t| t.audio)).unwrap_or(false)
+    }
+
     pub fn video_is_open(&self) -> bool {
         self.video.is_some()
     }

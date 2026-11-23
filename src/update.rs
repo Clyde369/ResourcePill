@@ -50,17 +50,17 @@ pub fn status_text() -> String {
     }
 }
 
-/// Checks shortly after start, then once a day, on its own thread. Offline, no releases or
+/// Checks shortly after start, then every 6 hours, on its own thread. Offline, no releases or
 /// anything odd = no update (the menu says why).
 pub fn spawn_checks() {
     std::thread::spawn(|| loop {
         std::thread::sleep(Duration::from_secs(30));
         // the copy left by the last update (still in use when the new one started, so retried here)
-        if let Some(me) = std::env::current_exe().ok().filter(|_| safe_to_replace()) {
+        if let Some(me) = std::env::current_exe().ok() {
             let _ = std::fs::remove_file(old_path(&me));
         }
         run_check();
-        std::thread::sleep(Duration::from_secs(24 * 3600));
+        std::thread::sleep(Duration::from_secs(6 * 3600));
     });
 }
 
@@ -142,20 +142,27 @@ pub fn download_path() -> Option<PathBuf> {
     Some(crate::bundle::helper_dir()?.join("update.download"))
 }
 
-/// Whether this copy may replace its own exe: never when elevated. An admin-owned folder can still
-/// grant users write access, and anything running as the user could swap the file in between and
-/// have it run as admin, so the releases page is offered instead.
-// ponytail: elevated installs update by hand; add a DACL check + handle-verified launch if that matters
-pub fn safe_to_replace() -> bool {
-    !crate::admin::is_elevated()
+/// Automatic installs: at most one try an hour (a failed download isn't retried every second).
+pub fn auto_try_due() -> bool {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(3600)) {
+        return false;
+    }
+    *last = Some(std::time::Instant::now());
+    true
 }
 
 /// Checks the download against the published SHA-256, puts it in place of this exe (Windows lets
 /// a running exe be renamed) and starts it. The caller then quits.
+///
+/// Also when elevated (admin mode): the admin task already starts this same exe, from the same
+/// folder, as admin at every sign-in, so whoever can write that folder can already get admin
+/// without an update; replacing it with bytes checked against GitHub's published SHA-256 (the
+/// exact bytes written are the ones checked) adds no new way in.
+// ponytail: admin mode runs the exe from a user-writable folder; move it to an admin-only folder
+// (like the helper, bundle.rs) to close that for the task and updates alike
 pub fn install(r: &Release) -> Result<(), String> {
-    if !safe_to_replace() {
-        return Err("Update available · download it from the releases page".into());
-    }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let dl = download_path().ok_or("no download folder")?;
     // read once and check these exact bytes: nothing can swap the file between the check and the copy

@@ -198,12 +198,13 @@ struct Settings {
     video_ghost: bool, // clicks go through the video
     video_tabs: String, // the browser's tabs (addresses, tab-separated) and the one on screen
     video_tab: usize,
+    auto_update: bool, // install found updates by themselves
     pos: Option<(i32, i32)>, // pill top-left, physical px
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, gpu: false, gpu_asked: false, video_url: String::new(), video_w: 0, video_alpha: 0, video_chat: 1, video_ghost: false, video_tabs: String::new(), video_tab: 0, pos: None }
+        Settings { theme: 0, shown: [true; 5], size: 1, opacity: 0, interval: 1, side_layout: true, vertical: false, click_through: false, card: false, smooth: 0, admin_mode: false, clock: true, anim: 0, asr: 0, llm: 0, chime: true, explain: 0, final_pass: true, keep_audio: true, half_chime: true, cues: true, tx_cloud: false, voice: true, fps: 3, duck: true, duck_ai: true, duck_roles: String::new(), art_tint: true, kbd_show: true, guide_done: false, rec_dir: String::new(), auto_hide: false, gpu: false, gpu_asked: false, video_url: String::new(), video_w: 0, video_alpha: 0, video_chat: 1, video_ghost: false, video_tabs: String::new(), video_tab: 0, auto_update: true, pos: None }
     }
 }
 
@@ -261,6 +262,7 @@ impl Settings {
                 "video_chat" => s.video_chat = idx(video::CHATS.len()).unwrap_or(1),
                 "video_ghost" => s.video_ghost = v == "1",
                 "video_tabs" => s.video_tabs = v.to_string(),
+                "auto_update" => s.auto_update = v == "1",
                 "video_tab" => s.video_tab = n.filter(|&n| (0..1000).contains(&n)).unwrap_or(0) as usize,
                 "shown" if v.len() == 5 => {
                     for (i, c) in v.chars().enumerate() {
@@ -288,8 +290,8 @@ impl Settings {
         let shown: String = self.shown.iter().map(|&v| if v { '1' } else { '0' }).collect();
         let (x, y) = self.pos.unwrap_or((0, 0));
         let text = format!(
-            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\ngpu={}\ngpu_asked={}\nvideo_url={}\nvideo_w={}\nvideo_alpha={}\nvideo_chat={}\nvideo_ghost={}\nvideo_tabs={}\nvideo_tab={}\nshown={}\nx={}\ny={}\n",
-            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), b(self.gpu), b(self.gpu_asked), self.video_url.replace(['\r', '\n'], ""), self.video_w, self.video_alpha, self.video_chat, b(self.video_ghost), self.video_tabs.replace(['\r', '\n'], ""), self.video_tab, shown, x, y
+            "theme={}\nsize={}\nopacity={}\ninterval={}\nside_layout={}\nvertical={}\nclick_through={}\ncard={}\nsmooth={}\nadmin_mode={}\nclock={}\nanim={}\nasr={}\nllm={}\nchime={}\nexplain={}\nfinal_pass={}\nkeep_audio={}\nhalf_chime={}\ncues={}\ntx_cloud={}\nvoice={}\nfps={}\nduck={}\nduck_ai={}\nduck_roles={}\nart_tint={}\nkbd_show={}\nguide_done={}\nrec_dir={}\nauto_hide={}\ngpu={}\ngpu_asked={}\nvideo_url={}\nvideo_w={}\nvideo_alpha={}\nvideo_chat={}\nvideo_ghost={}\nvideo_tabs={}\nvideo_tab={}\nauto_update={}\nshown={}\nx={}\ny={}\n",
+            self.theme, self.size, self.opacity, self.interval, b(self.side_layout), b(self.vertical), b(self.click_through), b(self.card), self.smooth, b(self.admin_mode), b(self.clock), self.anim, self.asr, self.llm, b(self.chime), self.explain, b(self.final_pass), b(self.keep_audio), b(self.half_chime), b(self.cues), b(self.tx_cloud), b(self.voice), self.fps, b(self.duck), b(self.duck_ai), self.duck_roles, b(self.art_tint), b(self.kbd_show), b(self.guide_done), self.rec_dir, b(self.auto_hide), b(self.gpu), b(self.gpu_asked), self.video_url.replace(['\r', '\n'], ""), self.video_w, self.video_alpha, self.video_chat, b(self.video_ghost), self.video_tabs.replace(['\r', '\n'], ""), self.video_tab, b(self.auto_update), shown, x, y
         );
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
         // write-then-rename so a crash mid-write never leaves a corrupt file
@@ -1207,6 +1209,7 @@ impl App {
                 WM_APP_DATA => {
                     self.snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     self.refresh_mixer(); // apps come and go
+                    self.auto_update(); // a found update installs itself when nothing would be interrupted
                     // short notes ("highlight some text first", "key saved") clear themselves after 8 s
                     if self.job.as_ref().is_some_and(|j| j.note && j.at.elapsed().as_secs() >= 8) {
                         self.job = None;
@@ -1863,14 +1866,23 @@ impl App {
         self.after_rec_change();
     }
 
+    /// Installs a found update by itself (unless turned off) when nothing would be interrupted: not
+    /// recording, no download running, the menu closed, and no browser tab playing sound. The pill
+    /// restarts in a moment; its browser tabs come back.
+    fn auto_update(&mut self) {
+        if !self.cfg.auto_update || self.updating.is_some() || update::available().is_none() {
+            return;
+        }
+        let busy = self.rec.busy() || self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) || self.settings.is_some() || self.video_playing();
+        if !busy && update::auto_try_due() {
+            self.start_update();
+        }
+    }
+
     /// "New update available": the helper downloads it in the strip, then `update_job_done` installs it.
     fn start_update(&mut self) {
         let Some(r) = update::available() else { return };
-        if !update::safe_to_replace() {
-            // elevated, from a folder the user can write to: let them download it by hand
-            unsafe { ShellExecuteW(None, w!("open"), w!("https://github.com/Clyde369/ResourcePill/releases/latest"), None, None, SW_SHOWNORMAL) };
-            self.job = Some(recorder::Job::note(recorder::JobKind::Download, "Update", &format!("Update available ({}) · download it from the releases page", r.tag)));
-        } else if self.rec.busy() {
+        if self.rec.busy() {
             self.job = Some(recorder::Job::note(recorder::JobKind::Download, "Update", "Stop the recording first, then update"));
         } else if self.job.as_ref().is_some_and(|j| j.state == recorder::JobState::Running) {
             return; // one at a time
@@ -3127,6 +3139,7 @@ impl App {
                 self.explain_now();
                 return;
             }
+            1502 => self.cfg.auto_update = !self.cfg.auto_update,
             1501 => {
                 update::check_now(self.job_notify()); // the menu shows "checking…", then the answer
                 return;
@@ -3482,7 +3495,7 @@ mod tests {
     #[test]
     fn settings_roundtrip_and_garbage() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // tests that change APPDATA must not overlap
-        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, gpu: true, gpu_asked: true, video_url: "https://youtu.be/dQw4w9WgXcQ?t=5".into(), video_w: 640, video_alpha: 2, video_chat: 2, video_ghost: true, video_tabs: "https://www.twitch.tv/xqc	https://peter.pill/lists.html".into(), video_tab: 1, pos: Some((-100, 50)) };
+        let s = Settings { theme: 4, shown: [true, false, true, false, true], size: 2, opacity: 3, interval: 0, side_layout: true, vertical: true, click_through: false, card: true, smooth: 2, admin_mode: true, clock: false, anim: 1, asr: 1, llm: 2, chime: false, explain: 1, final_pass: false, keep_audio: true, half_chime: false, cues: false, tx_cloud: true, voice: false, fps: 1, duck: false, duck_ai: false, duck_roles: "chrome=l".into(), art_tint: false, kbd_show: false, guide_done: true, rec_dir: "D:/Meetings".into(), auto_hide: true, gpu: true, gpu_asked: true, video_url: "https://youtu.be/dQw4w9WgXcQ?t=5".into(), video_w: 640, video_alpha: 2, video_chat: 2, video_ghost: true, video_tabs: "https://www.twitch.tv/xqc	https://peter.pill/lists.html".into(), video_tab: 1, auto_update: false, pos: Some((-100, 50)) };
         let dir = std::env::temp_dir().join("rp-test");
         unsafe { std::env::set_var("APPDATA", &dir) };
         s.save();
@@ -3494,6 +3507,7 @@ mod tests {
         assert_eq!(l.rec_dir, "D:/Meetings");
         assert_eq!((l.gpu, l.gpu_asked), (true, true));
         assert_eq!((l.video_url.as_str(), l.video_w, l.video_alpha, l.video_chat, l.video_ghost), ("https://youtu.be/dQw4w9WgXcQ?t=5", 640, 2, 2, true));
+        assert!(!l.auto_update);
         assert_eq!((l.video_tabs.as_str(), l.video_tab), ("https://www.twitch.tv/xqc	https://peter.pill/lists.html", 1));
         // corrupt / out-of-range values fall back to defaults, never panic
         let _ = std::fs::write(Settings::path().unwrap(), "theme=99\nsize=-1\nshown=00000\nx=abc\n=\n\u{0}");
