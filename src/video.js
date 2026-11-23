@@ -55,7 +55,7 @@
 
   const CSS = `
   :host { all: initial; }
-  #rp { position: fixed; inset: 0; z-index: 2147483600; pointer-events: none; color: #f2f2f2; font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; user-select: none; --side: 0px; }
+  #rp { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; color: #f2f2f2; font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; user-select: none; --side: 0px; }
   #rp * { box-sizing: border-box; }
   #stage { position: absolute; left: 0; top: 0; bottom: 0; right: var(--side); background: #000; pointer-events: auto; }
   #stage iframe, #stage > div { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
@@ -93,6 +93,9 @@
   #tiles { display: flex; gap: 10px; margin-top: 10px; }
   #rp.err #tiles { display: none; }
   #tiles button { height: 38px; padding: 0 16px; border-radius: 19px; font-weight: 600; }
+  #crop { position: absolute; inset: 0; cursor: crosshair; background: #0004; pointer-events: auto; outline: none; }
+  #crop .box { position: absolute; border: 2px solid #5ac8fa; background: #5ac8fa22; border-radius: 4px; }
+  #crop .hint { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: #000d; padding: 8px 14px; border-radius: 16px; font-size: 12.5px; white-space: nowrap; }
   #toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 90%; padding: 8px 14px; border-radius: 16px; background: #000c; font-size: 12.5px; text-align: center; opacity: 0; transition: opacity .25s; }
   #rp.browse #toast { bottom: 56px; }
   #toast.on { opacity: 1; }
@@ -197,6 +200,7 @@
     if (!root) return;
     root.classList.toggle('browse', !playerPage());
     ui.back.hidden = ours;
+    ui.addItem.hidden = location.hostname === HOST; // our own pages have nothing to add
   }
 
   function onError(code) {
@@ -266,6 +270,86 @@
     apply(N.append, row, [plus]);
   }
 
+  // ---------- Add to list ----------
+  // The page's own product data (most shops publish it: schema.org JSON-LD, or product meta tags):
+  // exact name and price, no AI needed.
+  function pageProduct() {
+    const out = { name: '', price: null, currency: '' };
+    const visit = o => {
+      if (!o || typeof o !== 'object' || out.price != null) return;
+      if (isArray(o)) { for (let i = 0; i < o.length; i++) visit(o[i]); return; }
+      const type = [].concat(o['@type'] || []).join(' ');
+      if (/Product/i.test(type)) {
+        const offers = [].concat(o.offers || []);
+        for (let i = 0; i < offers.length; i++) {
+          const x = offers[i] || {};
+          const p = x.price ?? x.lowPrice ?? (x.priceSpecification && x.priceSpecification.price);
+          if (p != null) { out.name = Str(o.name || ''); out.price = p; out.currency = Str(x.priceCurrency || ''); return; }
+        }
+        if (!out.name) out.name = Str(o.name || '');
+      }
+      visit(o['@graph']);
+    };
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(s => { try { visit(JSON.parse(s.textContent)); } catch (e) {} });
+    const meta = n => { const m = document.querySelector(`meta[property="${n}"],meta[name="${n}"],meta[itemprop="${n}"]`); return m && m.getAttribute('content'); };
+    if (out.price == null) {
+      const p = meta('product:price:amount') || meta('og:price:amount');
+      if (p) { out.price = p; out.currency = meta('product:price:currency') || meta('og:price:currency') || ''; out.name = out.name || meta('og:title') || ''; }
+    }
+    return out;
+  }
+
+  // The words inside a dragged box: every bit of text (and image description) it covers.
+  function cropText(r) {
+    const parts = [];
+    let len = 0;
+    const hit = b => b.width > 0 && b.right > r.left && b.left < r.right && b.bottom > r.top && b.top < r.bottom;
+    document.querySelectorAll('img[alt]').forEach(img => { const a = img.alt.trim(); if (a && hit(img.getBoundingClientRect())) parts.push(a); });
+    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let n = walk.nextNode(); n && len < 4000; n = walk.nextNode()) {
+      const t = n.nodeValue.trim();
+      if (!t) continue;
+      range.selectNodeContents(n);
+      if (hit(range.getBoundingClientRect())) { parts.push(t); len += t.length; }
+    }
+    return parts.join('\n').slice(0, 4000);
+  }
+
+  function sendAdd(text, whole) {
+    post('list-add:' + JSON.stringify({ url: location.href, title: document.title, text, product: whole ? pageProduct() : {} }));
+  }
+
+  // Add: highlighted text goes straight in; otherwise drag a box around the item (Enter: this page's
+  // product, Esc: never mind)
+  function startAdd() {
+    const sel = Str(window.getSelection() || '').trim();
+    if (sel) return sendAdd(sel.slice(0, 4000), false);
+    const crop = h('div', { id: 'crop', tabindex: '-1' }, h('div', { class: 'hint' }, 'Drag a box around the item  ·  Enter: use this page  ·  Esc: cancel'));
+    root.append(crop);
+    crop.focus();
+    let start = null, box = null;
+    const rect = e => ({ left: Math.min(start.x, e.clientX), top: Math.min(start.y, e.clientY), right: Math.max(start.x, e.clientX), bottom: Math.max(start.y, e.clientY) });
+    on(crop, 'mousedown', e => { e.preventDefault(); start = { x: e.clientX, y: e.clientY }; box = h('div', { class: 'box' }); crop.append(box); });
+    on(crop, 'mousemove', e => {
+      if (!start) return;
+      const r = rect(e);
+      box.style.cssText = `left:${r.left}px;top:${r.top}px;width:${r.right - r.left}px;height:${r.bottom - r.top}px`;
+    });
+    on(crop, 'mouseup', e => {
+      if (!start) return;
+      const r = rect(e);
+      crop.remove();
+      if (r.right - r.left < 8 || r.bottom - r.top < 8) return sendAdd('', true); // a click, not a box: the page's product
+      const text = cropText(r);
+      sendAdd(text, !text);
+    });
+    on(crop, 'keydown', e => {
+      if (e.key === 'Escape') crop.remove();
+      if (e.key === 'Enter') { crop.remove(); sendAdd('', true); }
+    });
+  }
+
   function toast(text) {
     ui.toast.textContent = text;
     ui.toast.classList.add('on');
@@ -309,6 +393,8 @@
         h('input', { id: 'url', placeholder: 'Paste a link, type an address or search', spellcheck: 'false' }),
         h('div', { id: 'live' }, 'LIVE'),
         h('button', { id: 'chatBtn', hidden: true, title: 'Live chat: off, beside the video, or over it', icon: '' }, h('span', { id: 'chatTxt' }, 'Chat')),
+        h('button', { id: 'addItem', title: 'Add an item to your shopping list: drag a box around it (or highlight it first)', icon: '' }, 'Add'),
+        h('button', { id: 'listBtn', title: 'Your shopping list beside the page', icon: '' }, 'List'),
         h('button', { id: 'alpha', title: 'See-through: click to cycle', icon: '' }, h('span', { id: 'alphaTxt' }, '100%')),
         h('button', { id: 'ghost', title: "Ghost: clicks go through to what's underneath and it fades while the mouse is over it. Ctrl+Alt+G turns it on and off from anywhere; or hold Ctrl over it to use it.", icon: '' }, 'Ghost'),
         h('button', { id: 'hide', title: 'Hide (Ctrl+Alt+Y brings it back; the sound keeps playing)', icon: '' }),
@@ -336,6 +422,7 @@
         refresh();
       }
       if ('hover' in m) m.hover ? showBar(true) : setTimeout(() => showBar(false), 400);
+      if (m.toast) toast(Str(m.toast));
     });
 
     const url = ui.url;
@@ -354,6 +441,8 @@
     on(ui.back, 'click', () => history.back());
     on(ui.fwd, 'click', () => history.forward());
     on(ui.reload, 'click', () => location.reload());
+    on(ui.listBtn, 'click', () => post('side-list'));
+    on(ui.addItem, 'click', startAdd);
     // browser keys: Ctrl+T new tab, Ctrl+W close it, Ctrl+(Shift+)Tab next/previous, Ctrl+L the address bar
     apply(listen, window, ['keydown', e => {
       if (!trusted(e) || !e.ctrlKey || e.altKey) return;

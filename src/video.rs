@@ -21,6 +21,7 @@ pub const ALPHAS: [u8; 5] = [100, 85, 70, 50, 35]; // window opacity choices, %
 pub const CHATS: [&str; 3] = ["Off", "Beside the video", "Over the video"];
 const PEEK: u8 = 18; // % while the mouse is over a ghost video
 const CHAT_W: f32 = 300.0; // side chat column (DIPs, matches video.html)
+const LIST_W: f32 = 320.0; // the shopping list beside the page (DIPs)
 const GAP: f32 = 6.0; // between the pill and the video
 const MIN_W: f32 = 320.0;
 const RADIUS: f32 = 12.0;
@@ -41,6 +42,7 @@ pub struct Video {
     hidden: bool, // Ctrl+Alt+Y / the hide button (keeps playing)
     fresh: bool,  // just opened: a link on the clipboard plays first
     side: bool,   // live chat beside the video (window is wider)
+    list: bool,   // the shopping list beside the page (window is wider)
     shown: bool,
     rect: RECT,
     inside: bool, // mouse over it
@@ -234,6 +236,8 @@ struct Browser {
     active: u32,
     next: u32,
     extensions_done: bool,
+    side_on: bool, // the list beside the page (its own small page on the right)
+    side: Option<(ICoreWebView2Controller, ICoreWebView2)>,
 }
 
 thread_local! {
@@ -285,12 +289,123 @@ fn post(json: &str) {
 /// A message only the lists page may see: sent to the tab showing it right now, never to whatever
 /// site a tab moved on to while a price lookup was running.
 fn post_to_lists(json: &str) {
-    let views: Vec<ICoreWebView2> = browser(|b| b.tabs.iter().filter_map(|t| t.live.as_ref().map(|l| l.1.clone())).collect()).unwrap_or_default();
+    post_lists(json, true, true);
+}
+
+/// The same, to the lists tab(s) and/or the list beside the page (after one saves, the other catches up).
+fn post_lists(json: &str, tabs: bool, side: bool) {
+    let mut views: Vec<ICoreWebView2> = Vec::new();
+    browser(|b| {
+        if tabs {
+            views.extend(b.tabs.iter().filter_map(|t| t.live.as_ref().map(|l| l.1.clone())));
+        }
+        if side {
+            views.extend(b.side.as_ref().map(|s| s.1.clone()));
+        }
+    });
     for wv in views {
         let mut p = PWSTR::null();
-        if unsafe { wv.Source(&mut p) }.is_ok() && take_pwstr(p) == lists_page() {
+        if unsafe { wv.Source(&mut p) }.is_ok() && take_pwstr(p).starts_with(&lists_page()) {
             let _ = unsafe { wv.PostWebMessageAsJson(&HSTRING::from(json)) };
         }
+    }
+}
+
+/// The list beside the page: on (its own small page, made here) or off (closed, its memory freed).
+fn side_set(on: bool) {
+    let Some((was, gone, env, hwnd)) = browser(|b| {
+        let was = std::mem::replace(&mut b.side_on, on);
+        (was, if on { None } else { b.side.take() }, b.env.clone(), b.hwnd)
+    }) else {
+        return;
+    };
+    if let Some((c, _)) = gone {
+        let _ = unsafe { c.Close() };
+    }
+    relayout(hwnd);
+    if on && !was {
+        let Some(env) = env else { return };
+        let done = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |hr, ctl| match hr.and(ctl.ok_or(windows::core::Error::from(E_POINTER))) {
+            Ok(c) => unsafe { setup_side(hwnd, c) }.or_else(inbox_fail),
+            Err(e) => inbox_fail(e),
+        }));
+        let _ = unsafe { env.CreateCoreWebView2Controller(hwnd, &done) };
+    }
+}
+
+/// The list beside the page: only our lists page, only list messages; a link in it opens in a tab.
+unsafe fn setup_side(hwnd: HWND, ctl: ICoreWebView2Controller) -> windows::core::Result<()> {
+    unsafe {
+        let Some(page_dir) = browser(|b| (b.side_on && b.side.is_none()).then(|| b.page_dir.clone())).flatten() else {
+            let _ = ctl.Close(); // turned off (or already there) while it was starting
+            return Ok(());
+        };
+        let wv = ctl.CoreWebView2()?;
+        if let Ok(c2) = ctl.cast::<ICoreWebView2Controller2>() {
+            let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR { A: 255, R: 17, G: 18, B: 21 });
+        }
+        let s = wv.Settings()?;
+        let _ = s.SetAreDefaultContextMenusEnabled(false);
+        let _ = s.SetIsStatusBarEnabled(false);
+        let _ = s.SetAreDevToolsEnabled(cfg!(debug_assertions));
+        wv.cast::<ICoreWebView2_3>()?.SetVirtualHostNameToFolderMapping(&HSTRING::from(HOST), &HSTRING::from(page_dir.as_os_str()), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY)?;
+        let mut token = 0i64;
+        wv.add_NavigationStarting(
+            &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut p = PWSTR::null();
+                args.Uri(&mut p)?;
+                let uri = take_pwstr(p);
+                if !uri.starts_with(&lists_page()) {
+                    args.SetCancel(true)?;
+                    if web_ok(&uri) {
+                        send(format!("list-open:{uri}"));
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        wv.add_NewWindowRequested(
+            &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut p = PWSTR::null();
+                args.Uri(&mut p)?;
+                args.SetHandled(true)?;
+                let uri = take_pwstr(p);
+                if web_ok(&uri) {
+                    send(format!("list-open:{uri}"));
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        wv.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut p = PWSTR::null();
+                args.TryGetWebMessageAsString(&mut p)?;
+                let Some(s) = take_pwstr(p).strip_prefix(&format!("{}|", session_token())).map(str::to_string) else { return Ok(()) };
+                let allowed = ["list-load", "list-save:", "list-prices:", "list-share:", "list-open:"].iter().any(|k| s.starts_with(k));
+                if allowed {
+                    // a save from here: the lists tab catches up (not this page, which has it already)
+                    send(s.strip_prefix("list-save:").map_or(s.clone(), |d| format!("list-save-side:{d}")));
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        let ui = HSTRING::from(LISTS_UI.replace("%HOST%", HOST).replace("%TOKEN%", session_token()));
+        let nav = wv.clone();
+        let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |hr, _| {
+            hr?;
+            let _ = nav.Navigate(&HSTRING::from(format!("{}?side", lists_page())));
+            Ok(())
+        }));
+        wv.AddScriptToExecuteOnDocumentCreated(&ui, &added)?;
+        browser(|b| b.side = Some((ctl, wv)));
+        relayout(hwnd);
+        Ok(())
     }
 }
 
@@ -389,7 +504,7 @@ fn tab_show(id: u32) {
                     let _ = w.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
                 }
                 if let Some(hwnd) = browser(|b| b.hwnd) {
-                    let _ = ctl.SetBounds(client(hwnd));
+                    let _ = ctl.SetBounds(page_rect(hwnd));
                 }
                 let _ = ctl.SetIsVisible(true);
                 send("tab-shown".into());
@@ -472,6 +587,31 @@ unsafe fn client(hwnd: HWND) -> RECT {
     r
 }
 
+/// Width of the list beside the page (physical px; 0 while it's off).
+fn side_w(hwnd: HWND) -> i32 {
+    if browser(|b| b.side_on) == Some(true) { (LIST_W * unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0) as i32 } else { 0 }
+}
+
+/// Where the pages go: the window, less the list beside them.
+fn page_rect(hwnd: HWND) -> RECT {
+    let mut r = unsafe { client(hwnd) };
+    r.right = (r.right - side_w(hwnd)).max(r.left);
+    r
+}
+
+/// Pages on the left, the list (if on) on the right.
+fn relayout(hwnd: HWND) {
+    let page = page_rect(hwnd);
+    for c in live_controllers() {
+        let _ = unsafe { c.SetBounds(page) };
+    }
+    if let Some((c, _)) = browser(|b| b.side.clone()).flatten() {
+        let mut r = unsafe { client(hwnd) };
+        r.left = page.right;
+        let _ = unsafe { c.SetBounds(r) };
+    }
+}
+
 /// Rounded corners.
 unsafe fn round(hwnd: HWND) {
     unsafe {
@@ -497,13 +637,11 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                 }
             }
             WM_SIZE => {
-                for c in live_controllers() {
-                    let _ = c.SetBounds(client(hwnd));
-                }
+                relayout(hwnd);
                 round(hwnd);
             }
             WM_MOVE => {
-                for c in live_controllers() {
+                for c in live_controllers().into_iter().chain(browser(|b| b.side.as_ref().map(|s| s.0.clone())).flatten()) {
                     let _ = c.NotifyParentWindowPositionChanged();
                 }
             }
@@ -536,7 +674,7 @@ unsafe fn start_webview(hwnd: HWND, urls: Vec<String>, active: usize) -> windows
     let tabs: Vec<Tab> = urls.into_iter().enumerate().map(|(i, url)| Tab { id: i as u32, url, title: String::new(), live: None, audio: false }).collect();
     let active = active.min(tabs.len() - 1) as u32;
     let next = tabs.len() as u32;
-    BROWSER.with(|b| *b.borrow_mut() = Some(Browser { hwnd, env: None, page_dir, tabs, active, next, extensions_done: false }));
+    BROWSER.with(|b| *b.borrow_mut() = Some(Browser { hwnd, env: None, page_dir, tabs, active, next, extensions_done: false, side_on: false, side: None }));
     let opts = CoreWebView2EnvironmentOptions::default();
     unsafe {
         opts.set_additional_browser_arguments("--autoplay-policy=no-user-gesture-required".into());
@@ -699,7 +837,7 @@ unsafe fn setup(hwnd: HWND, id: u32, ctl: ICoreWebView2Controller) -> windows::c
                 let mut p = PWSTR::null();
                 args.TryGetWebMessageAsString(&mut p)?;
                 let Some(s) = take_pwstr(p).strip_prefix(&format!("{}|", session_token())).map(str::to_string) else { return Ok(()) };
-                if ["crashed", "fail", "full", "list-result", "list-error"].iter().any(|k| s.starts_with(k)) {
+                if ["crashed", "fail", "full", "list-result", "list-error", "list-added", "list-add-error", "list-save-side"].iter().any(|k| s.starts_with(k)) {
                     return Ok(()); // the window's own events, never from a page
                 }
                 // resize from the page's edges: hand the drag to Windows' own sizing loop
@@ -755,7 +893,7 @@ unsafe fn setup(hwnd: HWND, id: u32, ctl: ICoreWebView2Controller) -> windows::c
             })),
             &mut token,
         )?;
-        let _ = ctl.SetBounds(client(hwnd));
+        let _ = ctl.SetBounds(page_rect(hwnd));
         let url = browser(|b| {
             let t = b.tabs.iter_mut().find(|t| t.id == id)?;
             t.live = Some((ctl.clone(), wv.clone()));
@@ -840,7 +978,7 @@ impl App {
             let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
             let Ok(hwnd) = CreateWindowExW(ex, CLASS, w!("YouTube · ResourcePill"), WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, 1, 1, None, None, Some(hinst.into()), None) else { return };
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            self.video = Some(Video { hwnd, hidden: false, fresh: true, side: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
+            self.video = Some(Video { hwnd, hidden: false, fresh: true, side: false, list: false, shown: false, rect: RECT::default(), inside: false, cursor: POINT::default(), unlocked: false, applied: (100, false) });
             self.video_place();
             // your tabs from last time; a YouTube/Twitch link you just copied opens in a new tab on top
             let mut urls: Vec<String> = self.cfg.video_tabs.split('\t').filter(|u| web_ok(u)).map(str::to_string).collect();
@@ -866,8 +1004,8 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_VIDEO);
             let gone = BROWSER.with(|b| b.try_borrow_mut().ok().and_then(|mut g| g.take()));
-            for t in gone.map(|b| b.tabs).unwrap_or_default() {
-                if let Some((c, _)) = t.live {
+            if let Some(b) = gone {
+                for (c, _) in b.tabs.into_iter().filter_map(|t| t.live).chain(b.side) {
                     let _ = c.Close();
                 }
             }
@@ -886,7 +1024,7 @@ impl App {
         let wa = work_area(POINT { x: px + pw as i32 / 2, y: py + ph as i32 / 2 });
         let (l, t, r, b) = (wa.left as f32, wa.top as f32, wa.right as f32, wa.bottom as f32);
         let (e, gap) = (EDGE * s, GAP * s);
-        let side = if self.video.as_ref().is_some_and(|v| v.side) { CHAT_W * s } else { 0.0 };
+        let side = self.video.as_ref().map_or(0.0, |v| if v.side { CHAT_W * s } else { 0.0 } + if v.list { LIST_W * s } else { 0.0 });
         let auto = if lay.vertical { 480.0 * s } else { pw };
         let mut w = if self.cfg.video_w > 0 { self.cfg.video_w as f32 * s } else { auto + side };
         w = w.clamp(MIN_W * s + side, (r - l - 2.0 * e).max(MIN_W * s));
@@ -1114,8 +1252,50 @@ impl App {
                 "tab-prev" => tab_step(false),
                 // ---- smart lists (lists.js) ----
                 "list-load" => post_to_lists(&format!(r#"{{"lists":{},"region":"{}"}}"#, lists::load(), lists::region())),
-                "list-save" => {
-                    lists::save(val);
+                // a save from the lists tab: the list beside the page catches up, and the other way round
+                "list-save" | "list-save-side" => {
+                    if lists::save(val) {
+                        let json = format!(r#"{{"lists":{},"region":"{}"}}"#, lists::load(), lists::region());
+                        post_lists(&json, k == "list-save-side", k == "list-save");
+                    }
+                }
+                // the List button: the shopping list beside the page
+                "side-list" => {
+                    let on = !self.video.as_ref().is_some_and(|v| v.list);
+                    if let Some(v) = &mut self.video {
+                        v.list = on;
+                    }
+                    side_set(on);
+                    self.video_place();
+                }
+                // Add to list: the bar sends what it found on the page; the item is worked out off the UI thread
+                "list-add" => {
+                    post(r#"{"toast":"Adding it to your list…"}"#);
+                    let (facts, key, region) = (val.to_string(), extras::load_key("gemini"), lists::region());
+                    std::thread::spawn(move || {
+                        send(match lists::item_from_page(&facts, key).and_then(|item| {
+                            let what = format!("{}{}", item["name"].as_str().unwrap_or("Item"), item["price"].as_f64().map_or(String::new(), |p| format!(" · {p:.2}")));
+                            lists::add_item(item, &region).map(|(data, _)| serde_json::json!({"data": data, "toast": format!("Added to your list: {what}")}).to_string()) // not the list's name: this goes to the site's page
+                        }) {
+                            Ok(json) => format!("list-added:{json}"),
+                            Err(e) => format!("list-add-error:{e}"),
+                        });
+                    });
+                }
+                "list-added" => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(val) {
+                        post_to_lists(&format!(r#"{{"lists":{},"region":"{}"}}"#, v["data"].as_str().unwrap_or("null"), lists::region()));
+                        post(&serde_json::json!({ "toast": v["toast"] }).to_string());
+                    }
+                }
+                "list-add-error" => post(&serde_json::json!({ "toast": val }).to_string()),
+                // a link in a list: opens in a tab (a new one when the lists page is the tab on screen)
+                "list-open" if web_ok(val) => {
+                    if active_url().starts_with(&lists_page()) {
+                        tab_new(val.to_string(), true);
+                    } else {
+                        navigate(val);
+                    }
                 }
                 "list-share" => {
                     let (kind, text) = val.split_once('|').unwrap_or((val, ""));

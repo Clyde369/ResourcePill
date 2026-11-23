@@ -162,7 +162,10 @@
         save(); render();
       } }),
       h('span', { class: 'line' }, it.price == null ? '' : money(lineTotal(it))),
-      h('span', { class: 'store', title: it.store }, it.store || ''),
+      // added from a shop page: the shop's name opens that page in a tab
+      typeof it.url === 'string' && it.url.startsWith('https://')
+        ? h('a', { class: 'store', href: it.url, title: it.url, onclick: e => { e.preventDefault(); post('list-open:' + it.url); } }, it.store || 'shop')
+        : h('span', { class: 'store', title: it.store }, it.store || ''),
       h('button', { class: 'x', title: 'Remove', onclick: () => { list.items = list.items.filter(i => i !== it); save(); render(); } }, '×')));
 
     const budget = list.budget;
@@ -226,7 +229,7 @@
       h('button', { title: 'Copies the list and opens Google Keep: paste it into a new note (⋮ → Show checkboxes)', onclick: async () => { await copy(asText(false), 'Copied: paste it into a new Keep note'); setTimeout(() => { location.href = 'https://keep.google.com/'; }, 600); } }, 'Google Keep'));
 
     root.replaceChildren(header, add, h('div', { class: 'rows' }, ...rows, rows.length ? null : h('div', { class: 'empty muted' }, 'Nothing on this list yet. Type items above: “2x milk, bread, 6 eggs”.')),
-      totals, h('div', { class: 'calcrow' }, calcIn, calcOut), tools, ai, toastEl);
+      totals, h('div', { class: 'calcrow' }, calcIn, calcOut), tools, ...(ai ? [ai] : []), toastEl); // no "undefined" when there are no results
     if (focus) { const el = root.querySelector(`[data-k="${focus}"]`); if (el) el.focus(); }
   }
 
@@ -261,6 +264,7 @@
   .rows { display: flex; flex-direction: column; gap: 4px; }
   .row { display: grid; grid-template-columns: 22px 52px 1fr 90px 90px minmax(0, 120px) 28px; gap: 6px; align-items: center; }
   .row.done .name { text-decoration: line-through; opacity: .55; }
+  .row > * { min-width: 0; } .row input:not([type=checkbox]) { width: 100%; } /* fits a narrow panel */
   .row input[type=checkbox] { width: 18px; height: 18px; accent-color: #30d158; }
   .qty { text-align: center; padding: 0 4px; } .price { text-align: right; }
   .line { text-align: right; font-variant-numeric: tabular-nums; } .store { opacity: .6; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -281,6 +285,7 @@
   a { color: #5ac8fa; } .muted { opacity: .6; } .small { font-size: 11.5px; } .empty { padding: 14px 4px; }
   .toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); background: #000d; padding: 8px 14px; border-radius: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
+  html, body { overflow-x: hidden; }
   @media (max-width: 640px) { .row { grid-template-columns: 22px 44px 1fr 74px 28px; } .line, .store { display: none; } .totals { grid-template-columns: 1fr 1fr; } .item { grid-template-columns: 1fr; } }
   `;
 
