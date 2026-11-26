@@ -112,6 +112,7 @@ impl App {
         tx.push(act(1100 + recorder::LLM.len(), "No summary (transcript only)", cfg.llm == recorder::LLM.len()));
         tx.push(MI::Sep);
         tx.push(act_r(1202, "Accurate pass after stopping", &recorder::final_prediction(cpu), cfg.final_pass));
+        tx.push(act_r(1208, "Live transcript while recording", if cfg.live_tx { "off = lighter during calls" } else { "off: transcript after you stop" }, cfg.live_tx || !cfg.final_pass));
         if recorder::nvidia_gpu() && !admin::is_elevated() {
             let mb = setup::gpu_download_mb();
             tx.push(act_r(1207, "Use the GPU for the accurate pass", &if mb > 0 { format!("faster · {mb} MB download") } else { "NVIDIA · faster".into() }, cfg.gpu));

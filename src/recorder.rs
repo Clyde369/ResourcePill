@@ -41,6 +41,7 @@ pub struct Recorder {
     pub summary: Option<PathBuf>,
     pub folder: Option<PathBuf>,
     improving: bool, // saved (SAVED), the helper still working on a better version (until DONE)
+    live: bool,      // a live transcript while recording (off: recording only, transcript after stopping)
 }
 
 pub fn models_dir() -> PathBuf {
@@ -93,6 +94,7 @@ impl Recorder {
             summary: None,
             folder: None,
             improving: false,
+            live: true,
         }
     }
 
@@ -101,7 +103,7 @@ impl Recorder {
     }
 
     /// Starts recording. `notify` is called (from a background thread) whenever output arrives.
-    pub fn start(&mut self, asr: &str, llm: Option<PathBuf>, final_asr: Option<&str>, keep_audio: bool, gpu: bool, gemini_key: Option<String>, notify: impl Fn() + Send + 'static) -> Result<(), String> {
+    pub fn start(&mut self, asr: &str, llm: Option<PathBuf>, final_asr: Option<&str>, keep_audio: bool, gpu: bool, live: bool, gemini_key: Option<String>, notify: impl Fn() + Send + 'static) -> Result<(), String> {
         let exe = helper().ok_or("ResourcePill-Scribe.exe is missing next to ResourcePill.exe")?;
         let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
         let folder = recordings_dir().join(format!("{}-{:02}-{:02} {:02}.{:02}.{:02}", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond));
@@ -113,6 +115,9 @@ impl Recorder {
         if keep_audio {
             cmd.arg("--keep-audio");
         }
+        if !live && final_asr.is_some() {
+            cmd.arg("--no-live"); // record only; the accurate pass writes the transcript after stopping
+        }
         if gpu {
             cmd.arg("--gpu");
         }
@@ -122,6 +127,7 @@ impl Recorder {
         if let Some(l) = &llm {
             cmd.args(["--llm", &l.to_string_lossy()]);
         }
+        self.live = live || final_asr.is_none(); // no accurate pass: the live one is the only transcript
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -172,7 +178,7 @@ impl Recorder {
         for m in &msgs {
             let f: Vec<String> = m.split('\t').map(unescape).collect();
             match f[0].as_str() {
-                "READY" => self.status = "Listening".into(),
+                "READY" => self.status = if self.live { "Listening".into() } else { "Recording · the transcript comes after you stop".into() },
                 "SEG" if f.len() >= 4 => {
                     let who = f[2].to_string();
                     if !self.speakers.contains(&who) {

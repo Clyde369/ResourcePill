@@ -72,6 +72,7 @@ struct Args {
     explain: Option<String>, // "local" | "claude" | "gemini"
     final_asr: Option<String>, // re-transcribe the saved audio with this model after stopping
     keep_audio: bool,
+    no_live: bool, // --no-live: only record during the meeting; the transcript comes from the accurate pass
     gpu: bool, // --gpu: run the accurate pass on the GPU (CUDA runtime downloaded), else the CPU
     pass: Option<PathBuf>, // --pass <folder>: only the accurate pass, written to audio/accurate.json
     refine: Option<PathBuf>, // re-run the accurate pass on a recording folder that kept its audio
@@ -95,6 +96,7 @@ fn args() -> Args {
         explain: None,
         final_asr: None,
         keep_audio: false,
+        no_live: false,
         gpu: false,
         pass: None,
         refine: None,
@@ -116,6 +118,7 @@ fn args() -> Args {
             "--explain" => a.explain = Some(v()),
             "--final" => a.final_asr = Some(v()).filter(|s| !s.is_empty()),
             "--keep-audio" => a.keep_audio = true,
+            "--no-live" => a.no_live = true,
             "--gpu" => a.gpu = true,
             "--pass" => a.pass = Some(v().into()),
             "--provider" => CUDA.store(v() == "cuda", Ordering::Relaxed),
@@ -301,6 +304,44 @@ impl Phrases {
     }
 }
 
+/// Voice-detector spans → phrases for the model: padded 0.25 s each side so edge words aren't
+/// clipped, and joined when they touch or are within `join` samples of each other, up to 30 s.
+fn join_spans(spans: &[(usize, usize)], len: usize, join: usize) -> Vec<(usize, usize)> {
+    let pad = RATE as usize / 4;
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for &(s, e) in spans {
+        let (s, e) = (s.saturating_sub(pad), (e + pad).min(len));
+        match out.last_mut() {
+            Some(last) if s <= last.1 + join && e - last.0 <= 30 * RATE as usize => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::{RATE, join_spans};
+    const S: usize = RATE as usize; // one second
+
+    #[test]
+    fn a_sentence_with_short_pauses_stays_one_phrase() {
+        // three bits of one sentence, 0.6 s apart: one phrase on your mic, three without joining
+        let bits = [(S, 2 * S), (2 * S + 6 * S / 10, 4 * S), (4 * S + 6 * S / 10, 5 * S)];
+        assert_eq!(join_spans(&bits, 60 * S, 9 * S / 10), vec![(3 * S / 4, 5 * S + S / 4)]);
+        assert_eq!(join_spans(&bits, 60 * S, 0).len(), 3); // before: 0.6 s pauses are wider than the 2 x 0.25 s padding, so three pieces
+        // a real pause (2 s) still starts a new phrase
+        assert_eq!(join_spans(&[(S, 2 * S), (4 * S, 5 * S)], 60 * S, 9 * S / 10).len(), 2);
+    }
+
+    #[test]
+    fn phrases_stay_under_30_seconds_and_inside_the_audio() {
+        let bits: Vec<(usize, usize)> = (0..40).map(|i| (i * S + 1, i * S + 9 * S / 10)).collect(); // 40 s of talk, tiny gaps
+        let out = join_spans(&bits, 40 * S, 9 * S / 10);
+        assert!(out.len() >= 2 && out.iter().all(|&(s, e)| e - s <= 30 * S && e <= 40 * S));
+    }
+}
+
 fn bench(a: &Args) -> Result<(), String> {
     let rec = recognizer(&a.models, &a.asr, a.threads)?;
     let dir = a.models.join(&a.asr).join("test_wavs");
@@ -418,7 +459,8 @@ fn record(a: &Args) -> Result<(), String> {
     let start = Instant::now();
     let cap_out = audio::spawn(audio::Source::Playback, tx.clone(), stop.clone(), start);
     let cap_mic = audio::spawn(audio::Source::Mic, tx, stop.clone(), start);
-    let rec = recognizer(&a.models, &a.asr, a.threads)?;
+    // --no-live: no speech model during the meeting (lighter on the PC); the accurate pass writes the transcript
+    let rec = if a.no_live { None } else { Some(recognizer(&a.models, &a.asr, a.threads)?) };
     let mut speakers = Speakers {
         extractor: SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
             model: s(&voiceprint_model(&a.models)),
@@ -449,6 +491,7 @@ fn record(a: &Args) -> Result<(), String> {
     let mut lines: Vec<(f64, String, String)> = Vec::new();
     let mut playback_speech: Vec<(f64, f64)> = Vec::new(); // to recognise mic echo of the speakers
     let mut handle = |src: audio::Source, start_sample: i64, samples: Vec<f32>, lines: &mut Vec<(f64, String, String)>| {
+        let Some(rec) = &rec else { return }; // recording only
         let t0 = start_sample as f64 / RATE as f64;
         let t1 = t0 + samples.len() as f64 / RATE as f64;
         let who = match src {
@@ -465,7 +508,7 @@ fn record(a: &Args) -> Result<(), String> {
                 "You".into()
             }
         };
-        let text = transcribe(&rec, &samples);
+        let text = transcribe(rec, &samples);
         if text.is_empty() {
             return;
         }
@@ -788,26 +831,20 @@ fn final_pass(a: &Args, model: &str, pc: &Path, mic: &Path) -> Result<Vec<(f64, 
     let load = |p: &Path| Wave::read(&p.to_string_lossy()).map(|w| w.samples().to_vec()).unwrap_or_default();
     let (pc, mic) = (load(pc), load(mic));
 
-    // phrases: up to 30 s, padded 0.25 s each side so edge words are not clipped
-    let phrases = |audio: &[f32]| -> Result<Vec<(usize, usize)>, String> {
+    // phrases: up to 30 s, padded 0.25 s each side so edge words are not clipped. `join`: pieces this
+    // close together become one phrase (your own mic: noise removal such as NVIDIA Broadcast turns
+    // every pause into true silence, so a sentence would otherwise reach the model in short pieces
+    // and lose words at the cuts)
+    let phrases = |audio: &[f32], join: usize| -> Result<Vec<(usize, usize)>, String> {
         let mut p = Phrases { vad: vad(&a.models, 30.0, 0.35)?, pending: Vec::new() };
         let mut spans: Vec<(usize, usize)> = Vec::new();
         for chunk in audio.chunks(RATE as usize) {
             spans.extend(p.push(chunk).into_iter().map(|(s, v)| (s as usize, s as usize + v.len())));
         }
         spans.extend(p.finish().into_iter().map(|(s, v)| (s as usize, s as usize + v.len())));
-        let pad = RATE as usize / 4;
-        let mut out: Vec<(usize, usize)> = Vec::new();
-        for (s, e) in spans {
-            let (s, e) = (s.saturating_sub(pad), (e + pad).min(audio.len()));
-            match out.last_mut() {
-                Some(last) if s <= last.1 => last.1 = last.1.max(e), // padding made them touch: one phrase
-                _ => out.push((s, e)),
-            }
-        }
-        Ok(out)
+        Ok(join_spans(&spans, audio.len(), join))
     };
-    let (pc_spans, mic_spans) = (phrases(&pc)?, phrases(&mic)?);
+    let (pc_spans, mic_spans) = (phrases(&pc, 0)?, phrases(&mic, RATE as usize * 9 / 10)?);
     let total: usize = pc_spans.iter().chain(&mic_spans).map(|(s, e)| e - s).sum::<usize>().max(1);
     let mut done = 0usize;
     let mut last_pct = 0;

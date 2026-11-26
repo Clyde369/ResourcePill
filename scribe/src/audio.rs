@@ -40,7 +40,9 @@ unsafe fn run(src: Source, tx: &mpsc::Sender<(Source, Vec<f32>)>, stop: &AtomicB
         let float = tag == WAVE_FORMAT_IEEE_FLOAT
             || (tag == WAVE_FORMAT_EXTENSIBLE && { std::ptr::addr_of!((*(fmt as *const WAVEFORMATEXTENSIBLE)).SubFormat).read_unaligned() } == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
         let flags = if src == Source::Playback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
-        client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, fmt, None)?; // 200 ms buffer
+        // 2 s of room: when the PC is busy (a call, GPU noise removal, the live transcript) and this
+        // thread is late, Windows keeps the audio instead of dropping it (no delay: it is a recording)
+        client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 20_000_000, 0, fmt, None)?;
         CoTaskMemFree(Some(fmt as *const _));
         let capture: IAudioCaptureClient = client.GetService()?;
         let resampler = LinearResampler::create(rate as i32, crate::RATE).expect("resampler");
@@ -84,9 +86,13 @@ unsafe fn run(src: Source, tx: &mpsc::Sender<(Source, Vec<f32>)>, stop: &AtomicB
                 capture.ReleaseBuffer(frames)?;
             }
             produced += mono.len() as u64;
-            // loopback delivers nothing while nothing plays: pad silence so timestamps stay true
+            // loopback delivers nothing while nothing plays: pad silence so timestamps stay true. A mic
+            // always delivers, only sometimes late and in a burst (e.g. NVIDIA Broadcast while the GPU is
+            // busy): padding then would put silence mid-word and push your voice later, so a mic is
+            // padded only once it has really stopped (2 s: unplugged, or the device went away)
             let expected = ((start.elapsed().as_secs_f64() - started_at) * rate as f64) as u64;
-            if expected > produced + rate as u64 / 5 {
+            let slack = if src == Source::Mic { rate as u64 * 2 } else { rate as u64 / 5 };
+            if expected > produced + slack {
                 let gap = (expected - produced) as usize;
                 mono.extend(std::iter::repeat_n(0.0, gap));
                 produced += gap as u64;
