@@ -107,7 +107,7 @@ pub fn helper_dir() -> Option<PathBuf> {
         // Elevated (admin mode), the helper must not run from a folder this user can write to, or
         // anything running as them could swap it and get admin rights: use an admin-only folder.
         let dir = if crate::admin::is_elevated() {
-            admin_only_dir(&version)?
+            admin_folder(&format!("ResourcePill-bin-{version}"))?
         } else {
             PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("ResourcePill").join("bin").join(&version)
         };
@@ -125,11 +125,12 @@ pub fn helper_dir() -> Option<PathBuf> {
     .clone()
 }
 
-/// `C:\ProgramData\ResourcePill-bin-<version>`, created here so only Administrators and SYSTEM can
-/// change it (users may read and run). If it already exists it is used only when it's a real
-/// folder (not a link) owned by Administrators or SYSTEM, which a normal user can't fake;
-/// otherwise None (no helper) rather than running something planted.
-fn admin_only_dir(version: &str) -> Option<PathBuf> {
+/// `C:\ProgramData\<name>` (the helper: `ResourcePill-bin-<version>`; admin mode's own exe:
+/// `ResourcePill-app`), created here so only Administrators and SYSTEM can change it (users may
+/// read and run). If it already exists it is used only when it's a real folder (not a link) owned
+/// by Administrators or SYSTEM, which a normal user can't fake; otherwise None rather than running
+/// something planted.
+pub(crate) fn admin_folder(name: &str) -> Option<PathBuf> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::*;
     use windows::Win32::Security::*;
@@ -144,7 +145,7 @@ fn admin_only_dir(version: &str) -> Option<PathBuf> {
         windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
         PathBuf::from(s?)
     };
-    let dir = root.join(format!("ResourcePill-bin-{version}"));
+    let dir = root.join(name);
     let wide = HSTRING::from(dir.as_os_str());
     unsafe {
         // owner Administrators; protected DACL: SYSTEM + Administrators full, Users read/run
@@ -190,7 +191,7 @@ mod tests {
     fn live_planted_folder_refused() {
         let dir = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap()).join("ResourcePill-bin-test-planted");
         std::fs::create_dir_all(&dir).unwrap();
-        let got = super::admin_only_dir("test-planted");
+        let got = super::admin_folder("ResourcePill-bin-test-planted");
         let _ = std::fs::remove_dir(&dir);
         assert!(got.is_none());
     }

@@ -155,8 +155,11 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Registers "start at login with highest privileges" (no time limit, runs on battery). Needs admin.
+/// It starts the copy in the admin-only folder once there is one (see update::admin_exe), so
+/// nothing running as the user can swap what runs as admin.
 pub fn install_task() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
+    let protected = crate::update::admin_exe().filter(|p| p.exists());
+    let Some(exe) = protected.or_else(|| std::env::current_exe().ok()) else { return false };
     let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>

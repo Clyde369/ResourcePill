@@ -459,6 +459,15 @@ fn main() {
             // task missing or blocked: carry on without admin
             guard = Some(CreateMutexW(None, true, w!("Local\\ResourcePill.Single")));
         }
+        // Admin mode, still running from a folder you can write to: move to the admin-only folder
+        // (and point the admin task there), then hand over to that copy. Once only.
+        if elevated && settings.admin_mode {
+            if let Some(protected) = update::move_to_admin_folder() {
+                if std::process::Command::new(&protected).args(["--after-update", &std::process::id().to_string()]).spawn().is_ok() {
+                    return; // it waits for this copy to exit, then takes over
+                }
+            }
+        }
         let _guard = guard;
         explainui::repair_cursors(); // last run ended with glowing cursors (crash): restore them
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); // cover art + voice

@@ -95,7 +95,7 @@ The files are also in your recordings folder (default `Documents\ResourcePill\Re
 - Drag to move: it snaps to edges, corners and centre, and never leaves the screen.
 - Double-click switches between the pill and the card.
 - `Ctrl+Alt+M` or the tray icon hides and shows it. Click the gear or right-click for settings.
-- **Admin mode** (settings) adds CPU and SATA temperatures. It asks for administrator rights once, then starts at login through a scheduled task.
+- **Admin mode** (settings) adds CPU and SATA temperatures. It asks for administrator rights once, then starts at login through a scheduled task, from `C:ProgramDataResourcePill-app` (a folder only administrators can change, so nothing else can swap what runs as admin; updates go there too).
 - `ResourcePill.exe --quit` closes a running copy.
 
 ## Build

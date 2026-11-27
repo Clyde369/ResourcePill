@@ -153,17 +153,44 @@ pub fn auto_try_due() -> bool {
     true
 }
 
+/// Admin mode runs the pill from a folder only Administrators can change
+/// (`C:\ProgramData\ResourcePill-app`): nothing running as you can swap the exe the admin task
+/// starts as admin, and updates replace it there with nothing able to swap it in between.
+pub fn admin_exe() -> Option<PathBuf> {
+    Some(crate::bundle::admin_folder("ResourcePill-app")?.join("ResourcePill.exe"))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// Elevated (admin mode) but not running from the admin-only folder yet: put this build there and
+/// point the admin task at it. Returns the copy to start instead (the caller hands over and quits).
+/// One-file builds only: a dev build (helper beside it) stays where it is.
+pub fn move_to_admin_folder() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    let target = admin_exe()?;
+    if same_path(&me, &target) {
+        return None;
+    }
+    let bytes = std::fs::read(&me).ok()?;
+    crate::bundle::trailer(&bytes)?;
+    if target.exists() {
+        swap(&target, &bytes).ok()?;
+    } else {
+        std::fs::write(&target, &bytes).ok()?;
+    }
+    crate::admin::install_task().then_some(target)
+}
+
 /// Checks the download against the published SHA-256, puts it in place of this exe (Windows lets
-/// a running exe be renamed) and starts it. The caller then quits.
-///
-/// Also when elevated (admin mode): the admin task already starts this same exe, from the same
-/// folder, as admin at every sign-in, so whoever can write that folder can already get admin
-/// without an update; replacing it with bytes checked against GitHub's published SHA-256 (the
-/// exact bytes written are the ones checked) adds no new way in.
-// ponytail: admin mode runs the exe from a user-writable folder; move it to an admin-only folder
-// (like the helper, bundle.rs) to close that for the task and updates alike
+/// a running exe be renamed) and starts it. The caller then quits. Elevated, only the copy in the
+/// admin-only folder is ever replaced (see `admin_exe`).
 pub fn install(r: &Release) -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    if crate::admin::is_elevated() && !admin_exe().is_some_and(|a| same_path(&a, &me)) {
+        return Err("Update ready · restart the pill once to finish moving it to its protected folder".into());
+    }
     let dl = download_path().ok_or("no download folder")?;
     // read once and check these exact bytes: nothing can swap the file between the check and the copy
     let bytes = std::fs::read(&dl).map_err(|e| e.to_string())?;
