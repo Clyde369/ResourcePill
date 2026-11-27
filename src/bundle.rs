@@ -152,10 +152,18 @@ pub(crate) fn admin_folder(name: &str) -> Option<PathBuf> {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"), SDDL_REVISION_1, &mut sd, None).ok()?;
         let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
-        let created = CreateDirectoryW(&wide, Some(&sa)).is_ok();
+        let mut ok = CreateDirectoryW(&wide, Some(&sa)).is_ok() || admin_owned_dir(&dir);
+        // already there but not ours to trust (made by a normal user, or a link): we're elevated, so
+        // move it out of the way (renaming a link moves the link, never what it points to) and make
+        // a clean one, rather than giving up and running from somewhere a user can change
+        if !ok && crate::admin::is_elevated() {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            if std::fs::rename(&dir, root.join(format!("{name}.untrusted-{stamp}"))).is_ok() {
+                ok = CreateDirectoryW(&wide, Some(&sa)).is_ok(); // lost a race again: give up (None)
+            }
+        }
         let _ = LocalFree(Some(HLOCAL(sd.0)));
-        // already there: trust it only if it's a plain folder owned by an admin account
-        (created || admin_owned_dir(&dir)).then_some(dir)
+        ok.then_some(dir)
     }
 }
 
